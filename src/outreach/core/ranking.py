@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -30,7 +31,7 @@ class ContactScore:
 
 def _tier_for(title_lower: str) -> int | None:
     for tier, patterns in _TIERS:
-        if any(p in title_lower for p in patterns):
+        if any(re.search(r"\b" + re.escape(p) + r"\b", title_lower) for p in patterns):
             return tier
     return None
 
@@ -82,5 +83,5 @@ def rank_contacts(
         result = score_title(person.title, headcount, role_keywords, config)
         if result is not None:
             scored.append((person, result))
-    scored.sort(key=lambda pair: pair[1].score, reverse=True)
+    scored.sort(key=lambda pair: (-pair[1].score, pair[0].full_name))
     return scored[: config.max_contacts_per_company]

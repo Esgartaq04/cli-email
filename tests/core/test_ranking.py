@@ -1,3 +1,5 @@
+import random
+
 from outreach.config import RankingConfig
 from outreach.core.ranking import score_title, rank_contacts
 from outreach.types import PersonRef
@@ -62,3 +64,30 @@ def test_explanation_mentions_tier_and_headcount():
     s = score_title("Head of Engineering", 75, ["backend"], CFG)
     assert "tier 1" in s.explanation
     assert "75" in s.explanation
+
+
+def test_director_title_is_tier_two_not_tier_one():
+    # "director" contains the substring "cto" (di-REC-TO-r); word-boundary
+    # matching must not let that fall through to tier 1.
+    director = score_title("Director of Engineering", 200, ["backend"], CFG)
+    vp = score_title("VP Engineering", 200, ["backend"], CFG)
+    assert director.tier == 2
+    assert vp.tier == 1
+    assert director.score < vp.score
+
+
+def test_rank_contacts_is_stable_regardless_of_input_order():
+    people = [
+        person("A", "Staff Engineer"),
+        person("B", "Co-founder & CTO"),
+        person("C", "Technical Recruiter"),
+        person("D", "VP Engineering"),
+        person("E", "Engineering Manager"),
+    ]
+    expected = [p.full_name for p, _ in rank_contacts(people, 60, ["backend"], CFG)]
+
+    shuffled = list(people)
+    random.Random(0).shuffle(shuffled)
+    actual = [p.full_name for p, _ in rank_contacts(shuffled, 60, ["backend"], CFG)]
+
+    assert actual == expected == ["B", "D", "E"]
