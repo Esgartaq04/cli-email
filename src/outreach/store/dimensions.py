@@ -57,7 +57,8 @@ class ContactRepo:
                ON CONFLICT(company_id, full_name) DO UPDATE SET
                  title = excluded.title,
                  profile_url = COALESCE(excluded.profile_url, contacts.profile_url),
-                 email = COALESCE(excluded.email, contacts.email),
+                 email = CASE WHEN excluded.email_status = 'verified'
+                              THEN excluded.email ELSE NULL END,
                  email_status = excluded.email_status,
                  looked_up_at = excluded.looked_up_at""",
             (company_id, person.full_name, person.title, person.profile_url, email,

@@ -49,6 +49,36 @@ def test_mark_contacted_is_visible_on_next_read(tmp_path):
     assert contacts.for_company(cid)[0].contacted_at is not None
 
 
+def test_reresolving_as_unverified_clears_a_previously_verified_email(tmp_path):
+    companies, contacts = repos(tmp_path)
+    cid = companies.upsert("foo.com", "Foo", 48, "careers page")
+    verified = PersonRef("Marisol Okonkwo", "CTO", None, "m@foo.com", "verified")
+    contacts.upsert(cid, verified, "hunter", datetime(2026, 9, 1))
+
+    downgraded = PersonRef("Marisol Okonkwo", "CTO", None, None, "unverified")
+    contacts.upsert(cid, downgraded, "hunter", datetime(2026, 9, 8))
+
+    stored = contacts.already_resolved(cid, "Marisol Okonkwo")
+    assert stored is not None
+    assert stored.email is None
+    assert stored.email_status == "unverified"
+
+
+def test_reresolving_as_verified_after_verified_keeps_the_address(tmp_path):
+    companies, contacts = repos(tmp_path)
+    cid = companies.upsert("foo.com", "Foo", 48, "careers page")
+    first = PersonRef("Marisol Okonkwo", "CTO", None, "m@foo.com", "verified")
+    contacts.upsert(cid, first, "hunter", datetime(2026, 9, 1))
+
+    again = PersonRef("Marisol Okonkwo", "CTO", None, "m@foo.com", "verified")
+    contacts.upsert(cid, again, "hunter", datetime(2026, 9, 8))
+
+    stored = contacts.already_resolved(cid, "Marisol Okonkwo")
+    assert stored is not None
+    assert stored.email == "m@foo.com"
+    assert stored.email_status == "verified"
+
+
 def test_document_insert_dedupes_and_returns_original_id(tmp_path):
     conn = connect(tmp_path / "t.db")
     companies, docs = CompanyRepo(conn), DocumentRepo(conn)
