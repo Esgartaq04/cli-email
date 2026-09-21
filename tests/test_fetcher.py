@@ -16,6 +16,19 @@ def build(routes, **kwargs):
     return fetcher, sleeps
 
 
+class FakeClock:
+    """A controllable clock so throttle tests do not depend on real time."""
+
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def now(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
+
+
 def test_successful_fetch_returns_body_and_sends_honest_user_agent():
     seen = {}
 
@@ -50,9 +63,60 @@ def test_http_error_is_reported_not_raised():
 
 
 def test_second_request_to_same_host_sleeps_for_the_rate_limit():
+    clock = FakeClock()
     fetcher, sleeps = build({"/robots.txt": lambda r: httpx.Response(404),
                              "/a": lambda r: httpx.Response(200, text="a"),
-                             "/b": lambda r: httpx.Response(200, text="b")})
-    fetcher.get("https://acme.example/a")
+                             "/b": lambda r: httpx.Response(200, text="b")},
+                            now=clock.now)
+    fetcher.get("https://acme.example/a")  # primes the robots cache
+    sleeps.clear()
+
     fetcher.get("https://acme.example/b")
-    assert any(s > 0 for s in sleeps)
+
+    assert sleeps == [2.0]
+
+
+def test_request_after_the_rate_limit_has_elapsed_does_not_sleep():
+    clock = FakeClock()
+    fetcher, sleeps = build({"/robots.txt": lambda r: httpx.Response(404),
+                             "/a": lambda r: httpx.Response(200, text="a"),
+                             "/b": lambda r: httpx.Response(200, text="b")},
+                            now=clock.now)
+    fetcher.get("https://acme.example/a")  # primes the robots cache
+    sleeps.clear()
+    clock.advance(3.0)
+
+    fetcher.get("https://acme.example/b")
+
+    assert sleeps == []
+
+
+def test_robots_txt_server_error_disallows_the_host():
+    fetcher, _ = build({"/robots.txt": lambda r: httpx.Response(500),
+                        "/page": lambda r: httpx.Response(200, text="hello")})
+    out = fetcher.get("https://acme.example/page")
+    assert out.outcome == "blocked_by_robots"
+
+
+def test_robots_txt_network_error_disallows_the_host():
+    def raise_connect_error(request):
+        raise httpx.ConnectError("boom", request=request)
+
+    fetcher, _ = build({"/robots.txt": raise_connect_error,
+                        "/page": lambda r: httpx.Response(200, text="hello")})
+    out = fetcher.get("https://acme.example/page")
+    assert out.outcome == "blocked_by_robots"
+
+
+def test_malformed_url_returns_network_error_instead_of_raising():
+    fetcher, _ = build({})
+    out = fetcher.get("https://[::1")
+    assert out.outcome == "network_error"
+    assert out.body is None
+
+
+def test_url_httpx_rejects_after_robots_check_returns_network_error_instead_of_raising():
+    fetcher, _ = build({"/robots.txt": lambda r: httpx.Response(404)})
+    out = fetcher.get("https://acme.example/page\x00")
+    assert out.outcome == "network_error"
+    assert out.body is None
