@@ -89,6 +89,27 @@ def test_svp_evp_and_bare_vp_titles_score_tier_one():
     assert vp_comma is not None and vp_comma.tier == 1
 
 
+def test_cofounder_no_hyphen_scores_tier_one_not_dropped():
+    # \bfounder\b cannot match inside "Cofounder" (no boundary between "o"
+    # and "f"), so the one-word spelling silently vanished from ranking
+    # instead of just mis-tiering. A founder at a small company is the
+    # highest-value contact this tool exists to surface.
+    cofounder = score_title("Cofounder", 48, ["backend"], CFG)
+    assert cofounder is not None
+    assert cofounder.tier == 1
+
+
+def test_codirector_scores_tier_two_not_dropped():
+    codirector = score_title("Codirector of Engineering", 200, ["backend"], CFG)
+    director = score_title("Director of Engineering", 200, ["backend"], CFG)
+    cofounder_and_cto = score_title("Cofounder & CTO", 200, ["backend"], CFG)
+    assert codirector is not None
+    assert codirector.tier == 2
+    # Existing spellings are unaffected by the new patterns.
+    assert director.tier == 2
+    assert cofounder_and_cto.tier == 1
+
+
 def test_rank_contacts_is_stable_regardless_of_input_order():
     people = [
         person("A", "Staff Engineer"),

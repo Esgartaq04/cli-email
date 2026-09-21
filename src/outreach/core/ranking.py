@@ -9,10 +9,10 @@ from outreach.types import PersonRef
 
 # Ordered most senior first; first match wins.
 _TIERS: tuple[tuple[int, tuple[str, ...]], ...] = (
-    (1, ("founder", "cto", "chief technology", "svp", "evp", "vp", "vp engineering",
-         "vp of engineering", "head of engineering", "head of platform",
+    (1, ("founder", "cofounder", "cto", "chief technology", "svp", "evp", "vp",
+         "vp engineering", "vp of engineering", "head of engineering", "head of platform",
          "head of product engineering")),
-    (2, ("director", "senior manager", "head of")),
+    (2, ("director", "codirector", "senior manager", "head of")),
     (3, ("engineering manager", "team lead", "tech lead", "eng manager")),
     (4, ("staff engineer", "principal engineer", "senior engineer", "senior software")),
 )
