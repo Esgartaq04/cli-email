@@ -43,7 +43,8 @@ def extract_and_persist(
     accepted = rejected = 0
 
     for raw in llm.extract_claims(text):
-        if normalize_ws(raw.quote) not in haystack:
+        needle = normalize_ws(raw.quote)
+        if not needle or needle not in haystack:
             rejected += 1
             continue
         evidence_repo.insert(run_id, EvidenceItem(
