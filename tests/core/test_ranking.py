@@ -76,6 +76,19 @@ def test_director_title_is_tier_two_not_tier_one():
     assert director.score < vp.score
 
 
+def test_svp_evp_and_bare_vp_titles_score_tier_one():
+    # \bvp engineering\b cannot match inside "SVP Engineering" or "EVP
+    # Engineering" (no boundary between "S"/"E" and "v"), and a title like
+    # "VP, Platform" has no "engineering" at all. Standalone "svp"/"evp"/"vp"
+    # patterns must catch these without reopening the director/cto bug.
+    svp = score_title("SVP Engineering", 200, ["backend"], CFG)
+    evp = score_title("EVP Engineering", 200, ["backend"], CFG)
+    vp_comma = score_title("VP, Platform", 200, ["backend"], CFG)
+    assert svp is not None and svp.tier == 1
+    assert evp is not None and evp.tier == 1
+    assert vp_comma is not None and vp_comma.tier == 1
+
+
 def test_rank_contacts_is_stable_regardless_of_input_order():
     people = [
         person("A", "Staff Engineer"),
