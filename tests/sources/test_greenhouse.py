@@ -125,3 +125,38 @@ def test_job_with_none_location_is_excluded():
     client = httpx.Client(transport=httpx.MockTransport(_handler_for(payload)))
     source = GreenhouseBoardSource(Fetcher(client, sleep=lambda s: None), ("acme",))
     assert source.search(["backend engineer"], region="US") == []
+
+
+def test_matches_region_rejects_non_us_cities_sharing_other_state_code_suffixes():
+    """CO/MA/PA/TN are also ISO country codes for Colombia, Morocco, Panama
+    and Tunisia -- those must be rejected even though the trailing suffix
+    matches a US state abbreviation."""
+    source = GreenhouseBoardSource(fetcher=None, tokens=())
+    assert source._matches_region("Bogotá, CO", "US") is False
+    assert source._matches_region("Casablanca, MA", "US") is False
+    assert source._matches_region("Panama City, PA", "US") is False
+    assert source._matches_region("Tunis, TN", "US") is False
+
+
+def test_matches_region_still_accepts_real_us_cities_in_the_same_states():
+    """The broadened non-US marker list must not cost the real US markets
+    that share a trailing state code with a colliding country."""
+    source = GreenhouseBoardSource(fetcher=None, tokens=())
+    assert source._matches_region("Denver, CO", "US") is True
+    assert source._matches_region("Boston, MA", "US") is True
+    assert source._matches_region("Philadelphia, PA", "US") is True
+    assert source._matches_region("Nashville, TN", "US") is True
+
+
+def test_job_with_bare_string_location_does_not_raise():
+    """Some boards could plausibly send location as a bare string instead
+    of {"name": ...}; that must be treated as absent, not crash search()."""
+    payload = {"jobs": [
+        {"title": "Backend Engineer",
+         "absolute_url": "https://boards.greenhouse.io/acme/jobs/9",
+         "location": "Chicago, IL",
+         "company_name": "Acme"},
+    ]}
+    client = httpx.Client(transport=httpx.MockTransport(_handler_for(payload)))
+    source = GreenhouseBoardSource(Fetcher(client, sleep=lambda s: None), ("acme",))
+    assert source.search(["backend engineer"], region="US") == []

@@ -19,6 +19,13 @@ _US_MARKERS = (
 # Recognized non-US markers. Checked before the trailing state-code check
 # and before the US markers, so a non-US city/country name always wins over
 # an incidental two-letter suffix that happens to match a US state code.
+#
+# This deliberately includes every country whose ISO alpha-2 code collides
+# with a US state abbreviation (CA/IL/CO/MA/PA/TN/AL/AZ/GA/LA/MD/MT/NE/SC/
+# TO), by country name and by principal city, so e.g. "Bogotá, CO" doesn't
+# pass the trailing-state-code check just because Colombia's code is also
+# Colorado's. "Dublin, OH" / "Berlin, NH" (a US city sharing a name with a
+# foreign capital) are an accepted residual -- see greenhouse.py review notes.
 _NON_US_MARKERS = (
     "uk", "united kingdom", "london", "canada", "ontario", "toronto", "vancouver",
     "israel", "tel aviv", "india", "bengaluru", "bangalore", "germany", "berlin",
@@ -26,6 +33,21 @@ _NON_US_MARKERS = (
     "krakow", "singapore", "australia", "sydney", "melbourne", "brazil",
     "são paulo", "sao paulo", "mexico", "spain", "madrid", "barcelona", "france",
     "paris", "japan", "tokyo", "emea", "apac",
+    # ISO alpha-2 / US-state-code collisions (CO, MA, PA, TN, AL, AZ, GA,
+    # LA, MD, MT, NE, SC, TO): country name plus principal city.
+    "colombia", "bogotá", "bogota", "medellín", "medellin",
+    "morocco", "casablanca", "rabat",
+    "panama", "panama city",
+    "tunisia", "tunis",
+    "albania", "tirana",
+    "azerbaijan", "baku",
+    "gabon", "libreville",
+    "laos", "vientiane",
+    "moldova", "chișinău", "chisinau",
+    "malta", "valletta",
+    "niger", "niamey",
+    "seychelles", "victoria",
+    "tonga", "nukuʻalofa", "nukualofa",
 )
 
 _US_STATE_CODES = frozenset({
@@ -101,7 +123,9 @@ class GreenhouseBoardSource:
                 if not isinstance(job, dict):
                     continue
                 title = job.get("title", "")
-                location = (job.get("location") or {}).get("name", "")
+                raw_location = job.get("location")
+                location = (raw_location.get("name", "")
+                            if isinstance(raw_location, dict) else "")
                 if not any(term in title.lower() for term in terms):
                     continue
                 if not self._matches_region(location, region):
