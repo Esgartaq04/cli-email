@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Engineering Blog &mdash; Ledgerline</title></head>
+<body>
+<article>
+<h1>Splitting the nightly reconciliation job</h1>
+<p class="byline">Posted by the Platform team</p>
+<p>Our nightly reconciliation job now regularly exceeds its 6-hour window
+&mdash; we&rsquo;re splitting it into per-ledger workers so no single
+merchant&rsquo;s volume can blow the whole batch&rsquo;s budget. This
+isn&rsquo;t a hypothetical: on three of the last five nights the job ran
+past 9am, delaying same-day settlement reports for merchants on the East
+Coast.</p>
+<p>The fix, in short: shard by ledger id, run shards in parallel, and merge
+results at the end. It&rsquo;s not glamorous work &amp; it won&rsquo;t show
+up in a changelog most customers read, but it buys us headroom for the
+next 12&ndash;18 months of growth.</p>
+</article>
+</body>
+</html>
