@@ -79,6 +79,7 @@ def build_context(
     explode_on_domain: str | None = None,
     include_invented_quote: bool = False,
     include_malformed_posting: bool = False,
+    include_unconfirmed_domain: bool = False,
 ) -> RunContext:
     root = Path(tempfile.mkdtemp())
     conn = connect(root / "t.db")
@@ -114,6 +115,12 @@ def build_context(
     if explode_on_domain:
         postings.append(
             PostingRef("Bad Co", explode_on_domain, "Backend Engineer", "u3", "NYC, NY"))
+    if include_unconfirmed_domain:
+        # A Greenhouse token that does not match the company's real domain:
+        # every surface 404s via the factory's catch-all, so no fetch ever
+        # confirms "ghost.example" -- exactly the guessed-wrong-domain case.
+        postings.append(
+            PostingRef("Ghost Co", "ghost.example", "Backend Engineer", "u9", "NYC, NY"))
 
     return RunContext(
         config=CONFIG, today=TODAY,
@@ -136,6 +143,10 @@ def build_context(
                 "thin.example": [
                     PersonRef("Tomas Reyes", "Head of Engineering", None,
                               "t@thin.example", "verified"),
+                ],
+                "ghost.example": [
+                    PersonRef("Some Stranger", "VP Engineering", None,
+                              "s@ghost.example", "verified"),
                 ],
             },
             credits=credits,

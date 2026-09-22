@@ -58,3 +58,11 @@ def test_unverified_contact_never_renders_an_email_address(tmp_path):
 def test_diagnostics_footer_is_rendered():
     html = render_report(view())
     assert "Companies discovered" in html
+
+
+def test_unconfirmed_domain_shows_a_note_instead_of_empty_contacts():
+    v = view()
+    v.evidenced[0].domain_confirmed = False
+    v.evidenced[0].contacts = []
+    html = render_report(v)
+    assert "unconfirmed" in html.lower()

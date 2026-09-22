@@ -100,12 +100,14 @@ def build_view(ctx: RunContext, summary: RunSummary, fresh: bool = True) -> Repo
             (a.source_class.value, a.outcome, a.http_status)
             for a in ctx.fetch_attempts.for_company(run_id, bottleneck.company_id)
         ]
+        contacts_stage = ctx.runs.stage_status(run_id, bottleneck.company_id, "contacts")
         card = ReportCompany(
             name=company.name, domain=company.canonical_domain,
             headcount=company.headcount, headcount_source=company.headcount_source,
             claim=bottleneck.claim, summary=bottleneck.summary,
             reason=bottleneck.reason, evidence=evidence, contacts=contacts,
             fetch_log=fetch_log,
+            domain_confirmed=contacts_stage != "skipped_domain_unconfirmed",
         )
         (evidenced if bottleneck.passed else no_bottleneck).append(card)
 
@@ -125,6 +127,8 @@ def build_view(ctx: RunContext, summary: RunSummary, fresh: bool = True) -> Repo
             "Quotes accepted": str(summary.quotes_accepted),
             "Quotes rejected": str(summary.quotes_rejected) if fresh else not_recorded,
             "Skipped on quota": str(summary.skipped_quota) if fresh else not_recorded,
+            "Skipped — domain unconfirmed": (
+                str(summary.skipped_domain_unconfirmed) if fresh else not_recorded),
             "Company failures": str(summary.failures) if fresh else not_recorded,
         },
     )

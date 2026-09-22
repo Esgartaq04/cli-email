@@ -152,7 +152,14 @@
 </header>
 
 {% macro contacts_block(company) %}
-  {% if company.contacts %}
+  {% if not company.domain_confirmed %}
+  <div class="contacts">
+    <h3>Contacts</h3>
+    <p class="why-none">Domain unconfirmed — no surface fetch reached
+      {{ company.domain }}, so contact lookup was skipped rather than risk
+      enriching against the wrong company.</p>
+  </div>
+  {% elif company.contacts %}
   <div class="contacts">
     <h3>Contacts</h3>
     {% for c in company.contacts %}

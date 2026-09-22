@@ -49,6 +49,7 @@ class RunSummary:
     quotes_accepted: int = 0
     quotes_rejected: int = 0
     skipped_quota: int = 0
+    skipped_domain_unconfirmed: int = 0
     failures: int = 0
     errors: list[str] = field(default_factory=list)
 
@@ -126,8 +127,30 @@ def run_pipeline(
             ctx.runs.set_stage(run_id, company_id, "evidence", "failed", error=str(exc))
 
     # --- contacts (quota-aware) -----------------------------------------
-    pending = [c for c in company_ids
-               if ctx.runs.stage_status(run_id, c, "contacts") != "ok"]
+    # A Greenhouse board token is a guessed domain label, never a confirmed
+    # one (see `sources/jobboards/greenhouse.py`): `acmecorp` is not
+    # necessarily `acmecorp.com`. Enrichment must never run against a
+    # domain no surface fetch actually reached -- an unconfirmed domain
+    # that happens to belong to a DIFFERENT real company would come back
+    # with that company's own verified staff, and the report would present
+    # them under the target's name with a green "verified" badge. Requiring
+    # at least one successful surface fetch before spending an enrichment
+    # credit is cheap insurance against emailing the wrong company.
+    still_pending = [c for c in company_ids
+                     if ctx.runs.stage_status(run_id, c, "contacts") != "ok"]
+    pending = []
+    for company_id in still_pending:
+        confirmed = any(a.outcome == "ok"
+                        for a in ctx.fetch_attempts.for_company(run_id, company_id))
+        if confirmed:
+            pending.append(company_id)
+        else:
+            try:
+                ctx.runs.set_stage(run_id, company_id, "contacts",
+                                   "skipped_domain_unconfirmed")
+            except Exception as exc:
+                summary.errors.append(f"contacts {company_id}: {exc}")
+            summary.skipped_domain_unconfirmed += 1
     try:
         plan = allocate_quota(pending, ctx.contact_provider.remaining_credits())
     except Exception as exc:

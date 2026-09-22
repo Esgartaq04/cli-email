@@ -38,6 +38,8 @@ class ReportCompany:
     evidence: list[ReportEvidence] = field(default_factory=list)
     contacts: list[ReportContact] = field(default_factory=list)
     fetch_log: list[tuple[str, str, int | None]] = field(default_factory=list)
+    domain_confirmed: bool = True
+    error: str | None = None
 
 
 @dataclass

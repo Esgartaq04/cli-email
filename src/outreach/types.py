@@ -6,7 +6,8 @@ from enum import Enum
 from typing import Literal
 
 EmailStatus = Literal["verified", "unverified", "not_found"]
-StageStatus = Literal["pending", "ok", "failed", "skipped_quota"]
+StageStatus = Literal["pending", "ok", "failed", "skipped_quota",
+                      "skipped_domain_unconfirmed"]
 
 
 class SourceClass(str, Enum):

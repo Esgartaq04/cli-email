@@ -57,5 +57,7 @@ def test_reconstructed_summary_shows_not_recorded_for_unrecoverable_diagnostics(
     path = write_report(view, tmp_path)
     html = path.read_text()
 
-    assert html.count("not recorded") == 3
+    # quotes_rejected, skipped_quota, skipped_domain_unconfirmed and failures:
+    # none of the four is recoverable from what got persisted.
+    assert html.count("not recorded") == 4
     assert "Quotes accepted" in html and str(real_summary.quotes_accepted) in html

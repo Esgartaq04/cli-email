@@ -122,6 +122,33 @@ def test_a_malformed_posting_does_not_cost_the_other_companies():
     assert summary.no_bottleneck == 1
 
 
+def test_a_company_whose_domain_was_never_confirmed_is_not_enriched():
+    """A guessed Greenhouse-token domain that no surface actually reached
+    must never be handed to the contact provider -- a wrong-domain guess
+    would come back with a real, verified contact at a different company."""
+    ctx = build_context(include_unconfirmed_domain=True)
+    summary = run_pipeline(ctx, "Backend Engineer", "fintech")
+
+    ghost = ctx.companies.upsert("ghost.example", "Ghost Co", None, None)
+    assert ctx.runs.stage_status(summary.run_id, ghost, "contacts") == (
+        "skipped_domain_unconfirmed")
+    assert "ghost.example" not in ctx.contact_provider.find_calls
+    assert ctx.contacts.for_company(ghost) == []
+    assert summary.skipped_domain_unconfirmed == 1
+
+    # The other, legitimately-confirmed companies are unaffected.
+    assert summary.evidenced == 1
+
+
+def test_a_confirmed_domain_still_reaches_contacts():
+    """The guard costs nothing for the common case: a domain a surface
+    actually answered on is enriched exactly as before."""
+    ctx = build_context()
+    summary = run_pipeline(ctx, "Backend Engineer", "fintech")
+    assert summary.skipped_domain_unconfirmed == 0
+    assert "good.example" in ctx.contact_provider.find_calls
+
+
 def test_a_contact_provider_outage_does_not_discard_the_run():
     """Losing the credit check costs the contacts stage, not the evidence."""
     ctx = build_context()
