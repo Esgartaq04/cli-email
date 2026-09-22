@@ -103,23 +103,26 @@ def run_pipeline(
             ctx.evidence.clear_for_company(run_id, company_id)
             ctx.fetch_attempts.clear_for_company(run_id, company_id)
             result = _profile_and_extract(ctx, run_id, company_id, summary)
+            joined = "; ".join(result.errors)
+            summary.errors.extend(f"evidence {company_id}: {e}" for e in result.errors)
+            if result.completed or not result.errors:
+                # At least one surface was reached. Partial evidence is
+                # still evidence: a company whose changelog 500s but whose
+                # blog answered has earned its trip to the gate.
+                ctx.runs.set_stage(run_id, company_id, "evidence", "ok",
+                                   error=joined or None)
+            else:
+                summary.failures += 1
+                ctx.runs.set_stage(run_id, company_id, "evidence", "failed",
+                                   error=joined)
         except Exception as exc:  # one company's failure is data, not a crash
+            # Covers a failure anywhere above, including the `set_stage`
+            # calls themselves: a locked database or a constraint violation
+            # writing this company's checkpoint must not abort the run for
+            # every company still waiting behind it.
             summary.failures += 1
             summary.errors.append(f"evidence {company_id}: {exc}")
             ctx.runs.set_stage(run_id, company_id, "evidence", "failed", error=str(exc))
-            continue
-
-        joined = "; ".join(result.errors)
-        summary.errors.extend(f"evidence {company_id}: {e}" for e in result.errors)
-        if result.completed or not result.errors:
-            # At least one surface was reached. Partial evidence is still
-            # evidence: a company whose changelog 500s but whose blog
-            # answered has earned its trip to the gate.
-            ctx.runs.set_stage(run_id, company_id, "evidence", "ok",
-                               error=joined or None)
-        else:
-            summary.failures += 1
-            ctx.runs.set_stage(run_id, company_id, "evidence", "failed", error=joined)
 
     # --- contacts (quota-aware) -----------------------------------------
     pending = [c for c in company_ids
@@ -133,7 +136,14 @@ def run_pipeline(
         summary.errors.append(f"contacts: {exc}")
         for company_id in pending:
             summary.failures += 1
-            ctx.runs.set_stage(run_id, company_id, "contacts", "failed", error=str(exc))
+            try:
+                ctx.runs.set_stage(run_id, company_id, "contacts", "failed",
+                                   error=str(exc))
+            except Exception as stage_exc:
+                # Already handling one outage; a second fault writing this
+                # company's checkpoint must not stop the rest of the pending
+                # companies from at least being recorded as failed too.
+                summary.errors.append(f"contacts {company_id}: {stage_exc}")
         plan = QuotaPlan(process=[], skipped=[])
     for company_id in plan.skipped:
         ctx.runs.set_stage(run_id, company_id, "contacts", "skipped_quota")

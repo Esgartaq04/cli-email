@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import datetime
 
 import pytest
@@ -279,3 +280,40 @@ def test_the_short_circuit_only_covers_the_address_already_paid_for():
     assert ctx.contact_provider.verify_calls == []
     assert [(c.email, c.email_status) for c in ctx.contacts.for_company(good)] == [
         ("marisol@good.example", "verified")]
+
+
+def test_a_set_stage_failure_for_one_company_does_not_abort_the_run():
+    """The evidence checkpoint write is data, not a crash, like everything else.
+
+    `set_stage` for the evidence stage sits, after the per-surface rework,
+    outside any surrounding guard on the success path: a real research
+    result (2 good surfaces) is computed, and only the write that records
+    it fails. That write raising must not take the rest of the run with it.
+    """
+    ctx = build_context()
+    good = ctx.companies.upsert("good.example", "Good Co", None, None)
+    real_set_stage = ctx.runs.set_stage
+
+    def set_stage(run_id, company_id, stage, status, error=None):
+        if company_id == good and stage == "evidence" and status == "ok":
+            raise sqlite3.OperationalError("database is locked")
+        return real_set_stage(run_id, company_id, stage, status, error=error)
+
+    ctx.runs.set_stage = set_stage
+
+    summary = run_pipeline(ctx, "Backend Engineer", "fintech")
+
+    # The failure was recorded, not swallowed and not fatal.
+    assert any("database is locked" in e for e in summary.errors)
+    assert ctx.runs.stage_status(summary.run_id, good, "evidence") == "failed"
+
+    # No fabricated verdict for the company whose checkpoint write failed.
+    verdicts = {b.company_id: b.passed for b in ctx.bottlenecks.for_run(summary.run_id)}
+    assert good not in verdicts
+
+    # The other company was never touched by the injected failure and still
+    # reached a verdict.
+    thin = ctx.companies.upsert("thin.example", "Thin Co", None, None)
+    assert thin in verdicts
+    assert verdicts[thin] is False  # thin.example is the no-bottleneck company
+    assert summary.no_bottleneck == 1
