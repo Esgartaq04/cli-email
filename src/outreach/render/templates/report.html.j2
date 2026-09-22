@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ view.role_title }} · {{ view.sector }} — {{ view.run_date.isoformat() }}</title>
+<style>
+  :root {
+    --bg: #f7f7f5;
+    --surface: #ffffff;
+    --border: #e2e1dc;
+    --border-strong: #cfcdc6;
+    --text: #1c1b19;
+    --muted: #6b6963;
+    --faint: #94918a;
+    --accent: #2f5d50;
+    --accent-soft: #e6efeb;
+    --warn: #8a5a20;
+    --warn-soft: #f6ecdd;
+    --bad: #8c3434;
+    --bad-soft: #f7e6e4;
+    --quote-bar: #2f5d50;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17181a;
+      --surface: #1f2123;
+      --border: #32353a;
+      --border-strong: #44484e;
+      --text: #ececea;
+      --muted: #a2a49f;
+      --faint: #7b7e7a;
+      --accent: #7fc2ac;
+      --accent-soft: #23322d;
+      --warn: #d9ab6c;
+      --warn-soft: #322a1d;
+      --bad: #e08a80;
+      --bad-soft: #33221f;
+      --quote-bar: #7fc2ac;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #17181a; --surface: #1f2123; --border: #32353a; --border-strong: #44484e;
+    --text: #ececea; --muted: #a2a49f; --faint: #7b7e7a; --accent: #7fc2ac;
+    --accent-soft: #23322d; --warn: #d9ab6c; --warn-soft: #322a1d; --bad: #e08a80;
+    --bad-soft: #33221f; --quote-bar: #7fc2ac;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 15px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 0 16px 64px; }
+
+  .sample-banner {
+    background: var(--warn-soft); color: var(--warn);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 16px; text-align: center;
+    font-size: 13px; font-weight: 600; letter-spacing: .01em;
+  }
+
+  header.run { padding: 32px 0 20px; border-bottom: 1px solid var(--border); }
+  h1 { font-size: 21px; margin: 0 0 6px; letter-spacing: -.01em; }
+  .run-meta { color: var(--muted); font-size: 13.5px; }
+  .run-meta span + span::before { content: "·"; margin: 0 8px; color: var(--faint); }
+
+  h2.section {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .09em;
+    color: var(--faint); font-weight: 600;
+    margin: 40px 0 14px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+  }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 20px; margin-bottom: 16px;
+  }
+  .card-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+  .co-name { font-size: 17px; font-weight: 650; letter-spacing: -.01em; }
+  .co-domain { font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+  .co-facts { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .co-facts .src { color: var(--faint); }
+
+  .claim {
+    margin: 18px 0 4px; font-size: 16px; font-weight: 600; line-height: 1.4;
+  }
+  .summary { color: var(--muted); font-size: 13.5px; margin: 0 0 16px; }
+
+  .ev { border-left: 3px solid var(--quote-bar); padding: 2px 0 2px 14px; margin: 14px 0; }
+  .ev blockquote {
+    margin: 0 0 6px; font-size: 15.5px; line-height: 1.5; color: var(--text);
+  }
+  .ev-meta { font-size: 12.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .badge {
+    display: inline-block; padding: 2px 7px; border-radius: 4px;
+    font-size: 11px; font-weight: 600; letter-spacing: .02em;
+    background: var(--accent-soft); color: var(--accent); border: 1px solid transparent;
+  }
+  .badge.third { background: transparent; color: var(--muted); border-color: var(--border-strong); }
+  .ev-meta a { color: var(--muted); text-decoration: underline; text-underline-offset: 2px; }
+  .ev-meta a:hover { color: var(--text); }
+
+  .contacts { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 14px; }
+  .contacts h3 { font-size: 11.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--faint); margin: 0 0 10px; font-weight: 600; }
+  .person { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 9px 0; border-bottom: 1px dashed var(--border); }
+  .person:last-child { border-bottom: 0; }
+  .p-main { flex: 1 1 260px; }
+  .p-name { font-weight: 600; }
+  .p-title { color: var(--muted); font-size: 13.5px; }
+  .p-why { color: var(--faint); font-size: 12.5px; margin-top: 2px; }
+  .p-mail { flex: 0 1 auto; font-family: var(--mono); font-size: 12.5px; }
+  .p-mail.ok { color: var(--accent); }
+  .p-mail.none { color: var(--faint); }
+  .flag { font-size: 11px; font-weight: 600; color: var(--warn); background: var(--warn-soft); padding: 2px 6px; border-radius: 4px; }
+
+  .fetchlog { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    font-family: var(--mono); font-size: 11.5px; padding: 3px 8px;
+    border-radius: 4px; border: 1px solid var(--border-strong); color: var(--muted);
+  }
+  .chip.ok { border-color: transparent; background: var(--accent-soft); color: var(--accent); }
+  .chip.err { border-color: transparent; background: var(--bad-soft); color: var(--bad); }
+  .why-none { color: var(--muted); font-size: 13.5px; margin-top: 12px; }
+
+  footer.diag {
+    margin-top: 44px; padding-top: 18px; border-top: 1px solid var(--border);
+    font-size: 13px; color: var(--muted);
+  }
+  footer.diag h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .09em; color: var(--faint); margin: 0 0 12px; font-weight: 600; }
+  .diag-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px 20px; }
+  .diag-item .k { font-size: 11.5px; color: var(--faint); text-transform: uppercase; letter-spacing: .05em; }
+  .diag-item .v { font-family: var(--mono); font-size: 14px; color: var(--text); }
+  .diag-err { margin-top: 14px; font-family: var(--mono); font-size: 12.5px; color: var(--bad); }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+<header class="run">
+  <h1>{{ view.role_title }} · {{ view.sector }}</h1>
+  <div class="run-meta">
+    <span>{{ view.run_date.strftime('%d %b %Y') }}</span>
+    <span>headcount {{ view.headcount_min }}–{{ view.headcount_max }}</span>
+    <span>{{ view.evidenced|length + view.no_bottleneck|length }} companies</span>
+    <span>{{ view.evidenced|length }} evidenced</span>
+    <span>{{ view.no_bottleneck|length }} no bottleneck</span>
+  </div>
+</header>
+
+{% macro contacts_block(company) %}
+  {% if company.contacts %}
+  <div class="contacts">
+    <h3>Contacts</h3>
+    {% for c in company.contacts %}
+    <div class="person">
+      <div class="p-main">
+        <div class="p-name">{{ c.full_name }}</div>
+        <div class="p-title">{{ c.title }}</div>
+        <div class="p-why">{{ c.why }}</div>
+      </div>
+      {% if c.email_status == 'verified' and c.email %}
+        <div class="p-mail ok">{{ c.email }}</div>
+      {% else %}
+        <div class="p-mail none">no verified address{% if c.profile_url %} —
+          <a href="{{ c.profile_url }}">profile</a>{% endif %}</div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+{% endmacro %}
+
+<h2 class="section">Evidenced bottlenecks</h2>
+{% for company in view.evidenced %}
+<article class="card">
+  <div class="card-head">
+    <span class="co-name">{{ company.name }}</span>
+    <span class="co-domain">{{ company.domain }}</span>
+  </div>
+  <div class="co-facts">
+    {% if company.headcount %}~{{ company.headcount }} employees
+      <span class="src">({{ company.headcount_source }})</span>
+    {% else %}headcount unknown{% endif %}
+  </div>
+  <p class="claim">{{ company.claim }}</p>
+  <p class="summary">{{ company.summary }}</p>
+  {% for e in company.evidence %}
+  <div class="ev">
+    <blockquote>{{ e.quote }}</blockquote>
+    <div class="ev-meta">
+      <span class="badge{% if e.source_class == 'news' %} third{% endif %}">
+        {{ e.source_class.replace('_', ' ') }}</span>
+      <span>{% if e.published_at %}{{ e.published_at.strftime('%d %b %Y') }}
+            {% else %}undated{% endif %}</span>
+      <a href="{{ e.url }}">{{ e.url }}</a>
+    </div>
+  </div>
+  {% endfor %}
+  {{ contacts_block(company) }}
+</article>
+{% endfor %}
+
+<h2 class="section">No bottleneck found</h2>
+{% for company in view.no_bottleneck %}
+<article class="card">
+  <div class="card-head">
+    <span class="co-name">{{ company.name }}</span>
+    <span class="co-domain">{{ company.domain }}</span>
+  </div>
+  <div class="co-facts">
+    {% if company.headcount %}~{{ company.headcount }} employees
+      <span class="src">({{ company.headcount_source }})</span>
+    {% else %}headcount unknown{% endif %}
+  </div>
+  {% if company.fetch_log %}
+  <div class="fetchlog">
+    {% for source_class, outcome, status in company.fetch_log %}
+    <span class="chip {% if outcome == 'ok' %}ok{% else %}err{% endif %}">
+      {{ source_class.replace('_', ' ') }} · {{ outcome }}{% if status %} {{ status }}{% endif %}
+    </span>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <p class="why-none"><strong>Gate failed:</strong>
+    {{ reason_text.get(company.reason, company.reason) }}
+    ({{ company.reason }}).</p>
+  {{ contacts_block(company) }}
+</article>
+{% endfor %}
+
+<footer class="diag">
+  <h2>Run diagnostics</h2>
+  <div class="diag-grid">
+    {% for key, value in view.diagnostics.items() %}
+    <div class="diag-item"><div class="k">{{ key }}</div><div class="v">{{ value }}</div></div>
+    {% endfor %}
+  </div>
+</footer>
+
+</div>
+</body>
+</html>
