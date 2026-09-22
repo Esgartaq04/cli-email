@@ -10,6 +10,7 @@ from outreach.core.dedupe import canonical_domain
 from outreach.core.gate import GateVerdict, evaluate
 from outreach.core.ranking import rank_contacts
 from outreach.extraction.extract import extract_and_persist
+from outreach.extraction.htmltext import html_to_text
 from outreach.pipeline.context import RunContext
 from outreach.sources.base import SurfaceTarget
 from outreach.sources.surfaces.standard import surface_targets
@@ -244,7 +245,14 @@ def _sweep_surface(ctx: RunContext, run_id: int, company_id: int, domain: str,
             outcome.outcome, outcome.status, 0))
         return
 
-    content_hash = ctx.cache.store(outcome.body.encode("utf-8"))
+    # Both the LLM and the substring guard must see the SAME text, or an
+    # honest quote that merely crosses an inline tag (or carries an entity
+    # like &rsquo;) is rejected, while a quote that literally preserves
+    # markup can survive and render as `&lt;strong&gt;` in the report the
+    # user pastes into an email. `outcome.body` is raw HTTP response text --
+    # extract plain prose from it before either side ever looks at it.
+    text = html_to_text(outcome.body)
+    content_hash = ctx.cache.store(text.encode("utf-8"))
     published_at = (
         ctx.today if target.source_class in CURRENT_STATE_CLASSES else None
     )
@@ -255,7 +263,7 @@ def _sweep_surface(ctx: RunContext, run_id: int, company_id: int, domain: str,
     ctx.fetch_attempts.insert(run_id, FetchAttempt(
         company_id, target.source_class, target.url, "ok", outcome.status, 1))
 
-    result = extract_and_persist(run_id, doc, outcome.body, ctx.llm,
+    result = extract_and_persist(run_id, doc, text, ctx.llm,
                                  ctx.evidence, document_id=doc_id)
     summary.quotes_accepted += result.accepted
     summary.quotes_rejected += result.rejected
