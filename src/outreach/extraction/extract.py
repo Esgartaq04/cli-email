@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from outreach.core.clustering import normalize_theme
 from outreach.llm.base import LLMClient
 from outreach.store.runs import EvidenceRepo
 from outreach.types import EvidenceItem, SourceDocument
@@ -45,6 +46,13 @@ def extract_and_persist(
     for raw in llm.extract_claims(text):
         needle = normalize_ws(raw.quote)
         if not needle or needle not in haystack:
+            rejected += 1
+            continue
+        if not normalize_theme(raw.theme):
+            # "", "—", "..." all normalize to "". A claim with no real
+            # theme would land in an unkeyed cluster with every other
+            # theme-less claim, merging unrelated evidence into one that
+            # can pass the gate -- see core/clustering.py.
             rejected += 1
             continue
         evidence_repo.insert(run_id, EvidenceItem(

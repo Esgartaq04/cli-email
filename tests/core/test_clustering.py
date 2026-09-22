@@ -27,3 +27,15 @@ def test_cluster_groups_equivalent_labels():
 
 def test_empty_input_gives_empty_clusters():
     assert cluster_by_theme([]) == {}
+
+
+def test_punctuation_only_themes_are_dropped_not_merged():
+    """"", "—" and "..." all normalize to "". Two UNRELATED claims that
+    both carry one of these must never land in the same cluster -- that
+    would manufacture the independence/corroboration the gate exists to
+    require."""
+    items = [item(1, "—"), item(2, "..."), item(3, ""),
+             item(4, "reconciliation-throughput")]
+    clusters = cluster_by_theme(items)
+    assert set(clusters) == {"reconciliation-throughput"}
+    assert [i.id for i in clusters["reconciliation-throughput"]] == [4]
