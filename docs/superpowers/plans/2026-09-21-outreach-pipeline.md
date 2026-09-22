@@ -19,7 +19,7 @@
 - An email is only ever presented as an email when `email_status == "verified"`. Unverified means the contact ships with `email=None`.
 - No `evidence_item` row persists unless its quote passes the substring guard.
 - Gate thresholds, source classes, first-party classification, recency window, headcount band, region and contact caps live in `config.toml` — never hardcoded in `core/`.
-- HTTP: honest user agent `outreach-pipeline/0.1 (+contact: esgartaq@gmail.com)`, robots.txt respected, per-domain rate limit of 1 request per 2 seconds.
+- HTTP: honest user agent `outreach-pipeline/0.1 (+contact: <OUTREACH_CONTACT_EMAIL>)`, robots.txt respected, per-domain rate limit of 1 request per 2 seconds.
 - Secrets in `.env`, which is gitignored. Missing required key aborts at startup before any network call.
 - Contact cap: 3 per company. Default headcount band 20–1000. Default region `US`. Default recency window 180 days.
 
@@ -1954,7 +1954,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-USER_AGENT = "outreach-pipeline/0.1 (+contact: esgartaq@gmail.com)"
+DEFAULT_USER_AGENT = "outreach-pipeline/0.1"  # contact appended from env
 
 
 @dataclass(frozen=True)

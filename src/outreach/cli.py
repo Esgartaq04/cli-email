@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 from outreach.config import Config, ConfigError, load_config, require_env
 from outreach.core.ranking import rank_contacts
-from outreach.net.fetcher import Fetcher
+from outreach.net.fetcher import Fetcher, build_user_agent
 from outreach.pipeline.context import RunContext
 from outreach.pipeline.runner import RunSummary, run_pipeline
 from outreach.render.report import (ReportCompany, ReportContact, ReportEvidence,
@@ -43,7 +43,13 @@ def build_context(config_path: Path = Path("config.toml")) -> RunContext:
         job_board = None  # set below, needs the fetcher
 
     conn = connect(config.paths.db)
-    fetcher = Fetcher(httpx.Client())
+    # The contact address is deliberately not in the source: it is a
+    # politeness signal for site operators, not a secret, but committing it
+    # would publish a scrapeable address every time this repo is shared.
+    fetcher = Fetcher(
+        httpx.Client(),
+        user_agent=build_user_agent(os.environ.get("OUTREACH_CONTACT_EMAIL")),
+    )
     if not use_fakes:
         from outreach.sources.jobboards.greenhouse import GreenhouseBoardSource
         job_board = GreenhouseBoardSource(fetcher, config.discovery.greenhouse_tokens)
@@ -208,6 +214,16 @@ def run(
     except ConfigError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2)
+
+    if not os.environ.get("OUTREACH_CONTACT_EMAIL", "").strip():
+        # The user agent still identifies the tool, but without a contact
+        # address a site operator who notices this traffic has no way to
+        # reach anyone about it. That is a politeness regression, not an
+        # error, so it warns rather than aborting.
+        typer.echo(
+            "Warning: OUTREACH_CONTACT_EMAIL is not set -- requests will "
+            "identify this tool but name no one to contact about them.",
+            err=True)
 
     if not ctx.config.discovery.greenhouse_tokens:
         # Without this, a first real run silently discovers zero companies

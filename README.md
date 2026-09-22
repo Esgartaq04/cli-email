@@ -32,6 +32,7 @@ cp .env.example .env
 ```
 ANTHROPIC_API_KEY=sk-ant-...
 HUNTER_API_KEY=...
+OUTREACH_CONTACT_EMAIL=you@example.com
 ```
 
 - `ANTHROPIC_API_KEY` — used by `AnthropicLLM` (`src/outreach/llm/anthropic_client.py`)
@@ -41,6 +42,12 @@ HUNTER_API_KEY=...
   code, not a model call.
 - `HUNTER_API_KEY` — used by `HunterProvider` (`src/outreach/contacts/hunter.py`)
   to find people at a company's domain and verify their email addresses.
+- `OUTREACH_CONTACT_EMAIL` — appended to the crawler's user agent as
+  `(+contact: ...)`, so a site operator who notices this traffic can reach a
+  person about it. Optional, and deliberately kept out of the source rather
+  than hardcoded: it is a politeness signal, not a secret, but committing it
+  would publish a scrapeable address. Unset, requests still identify the tool
+  and the CLI warns once per run.
 
 `.env` is gitignored. Both keys are required for a live run and are checked
 *before* any network call is made — a run with a missing key aborts

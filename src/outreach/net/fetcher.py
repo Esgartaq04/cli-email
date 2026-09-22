@@ -8,7 +8,22 @@ from urllib.parse import urlsplit
 
 import httpx
 
-USER_AGENT = "outreach-pipeline/0.1 (+contact: esgartaq@gmail.com)"
+DEFAULT_USER_AGENT = "outreach-pipeline/0.1"
+
+
+def build_user_agent(contact: str | None) -> str:
+    """Compose the user agent, naming a contact address when one is configured.
+
+    The contact address is a politeness requirement, not a secret: these are
+    companies the user intends to email, and a site operator who sees this
+    traffic should be able to reach a person about it. It lives in the
+    environment rather than in the source so that publishing this repository
+    does not publish the address.
+    """
+    contact = (contact or "").strip()
+    if not contact:
+        return DEFAULT_USER_AGENT
+    return f"{DEFAULT_USER_AGENT} (+contact: {contact})"
 
 
 @dataclass(frozen=True)
@@ -32,11 +47,13 @@ class Fetcher:
         rate_limit_seconds: float = 2.0,
         sleep: Callable[[float], None] = time.sleep,
         now: Callable[[], float] = time.monotonic,
+        user_agent: str = DEFAULT_USER_AGENT,
     ) -> None:
         self.client = client
         self.rate_limit_seconds = rate_limit_seconds
         self.sleep = sleep
         self.now = now
+        self.user_agent = user_agent
         self._last_request: dict[str, float] = {}
         self._robots: dict[str, urllib.robotparser.RobotFileParser] = {}
 
@@ -55,7 +72,7 @@ class Fetcher:
         try:
             self._throttle(host)
             response = self.client.get(f"{scheme}://{host}/robots.txt",
-                                       headers={"User-Agent": USER_AGENT}, timeout=10.0)
+                                       headers={"User-Agent": self.user_agent}, timeout=10.0)
         except (httpx.HTTPError, httpx.InvalidURL, ValueError):
             # RFC 9309: robots.txt could not be read at all (network error,
             # or a host too malformed to even request). Assume the whole
@@ -84,12 +101,12 @@ class Fetcher:
             return FetchOutcome(url, None, None, "network_error")
         host = parts.netloc
 
-        if not self._robots_for(parts.scheme, host).can_fetch(USER_AGENT, url):
+        if not self._robots_for(parts.scheme, host).can_fetch(self.user_agent, url):
             return FetchOutcome(url, None, None, "blocked_by_robots")
 
         try:
             self._throttle(host)
-            response = self.client.get(url, headers={"User-Agent": USER_AGENT},
+            response = self.client.get(url, headers={"User-Agent": self.user_agent},
                                        timeout=20.0, follow_redirects=True)
         except (httpx.HTTPError, httpx.InvalidURL, ValueError):
             return FetchOutcome(url, None, None, "network_error")

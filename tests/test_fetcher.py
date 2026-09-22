@@ -1,5 +1,5 @@
 import httpx
-from outreach.net.fetcher import Fetcher, USER_AGENT
+from outreach.net.fetcher import DEFAULT_USER_AGENT, Fetcher, build_user_agent
 
 
 def handler_factory(routes):
@@ -41,7 +41,7 @@ def test_successful_fetch_returns_body_and_sends_honest_user_agent():
     out = fetcher.get("https://acme.example/page")
     assert out.outcome == "ok"
     assert out.body == "hello"
-    assert seen["ua"] == USER_AGENT
+    assert seen["ua"] == DEFAULT_USER_AGENT
 
 
 def test_robots_disallow_blocks_the_fetch():
@@ -120,3 +120,35 @@ def test_url_httpx_rejects_after_robots_check_returns_network_error_instead_of_r
     out = fetcher.get("https://acme.example/page\x00")
     assert out.outcome == "network_error"
     assert out.body is None
+
+
+def test_default_user_agent_names_no_contact_address():
+    """The address lives in the environment, never in the source."""
+    assert "@" not in DEFAULT_USER_AGENT
+    assert DEFAULT_USER_AGENT == "outreach-pipeline/0.1"
+
+
+def test_build_user_agent_appends_a_configured_contact():
+    assert build_user_agent("me@example.com") == (
+        "outreach-pipeline/0.1 (+contact: me@example.com)")
+
+
+def test_build_user_agent_omits_an_absent_or_blank_contact():
+    assert build_user_agent(None) == DEFAULT_USER_AGENT
+    assert build_user_agent("") == DEFAULT_USER_AGENT
+    assert build_user_agent("   ") == DEFAULT_USER_AGENT
+
+
+def test_configured_contact_reaches_the_wire():
+    seen = {}
+
+    def ok(request):
+        seen["ua"] = request.headers.get("user-agent")
+        return httpx.Response(200, text="hi")
+
+    transport = httpx.MockTransport(
+        lambda r: httpx.Response(404) if r.url.path == "/robots.txt" else ok(r))
+    fetcher = Fetcher(httpx.Client(transport=transport), sleep=lambda s: None,
+                      user_agent=build_user_agent("me@example.com"))
+    fetcher.get("https://acme.example/page")
+    assert seen["ua"] == "outreach-pipeline/0.1 (+contact: me@example.com)"
