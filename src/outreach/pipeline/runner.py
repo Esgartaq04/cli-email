@@ -298,27 +298,30 @@ def _resolve_contacts(ctx: RunContext, company_id: int, role_title: str) -> None
     people = ctx.contact_provider.find(company.canonical_domain, keywords)
     for person, _score in rank_contacts(people, company.headcount, keywords,
                                         ctx.config.ranking):
-        status = person.email_status
-        email = person.email if status == "verified" else None
-        if status == "verified" and not email:
-            # A provider claiming "verified" with no address has verified
-            # nothing. Stored as-is it would print as a verified contact in
-            # the report with nothing to send to.
-            status = "not_found"
-
-        if status != "verified":
-            prior = ctx.contacts.already_resolved(company_id, person.full_name)
-            confirmed = (prior.email if prior is not None
-                         and prior.email_status == "verified" else None)
-            if confirmed and person.email in (None, confirmed):
-                # This exact address was already confirmed and billed in an
-                # earlier run. Verification is charged per address, so
-                # re-asking buys the same answer twice — and a provider that
-                # has gone quiet must not erase what we paid to learn.
-                status, email = "verified", confirmed
-            elif person.email:
-                status = ctx.contact_provider.verify(person.email)
-                email = person.email if status == "verified" else None
+        # `find()`'s own reported status is never trusted here, even if it
+        # says "verified" -- domain search only tells you an address
+        # exists, not that it was confirmed deliverable. Treating find()'s
+        # status as authoritative would make the verified-email invariant
+        # hold by adapter convention rather than pipeline requirement: a
+        # one-character bug in an adapter's mapping (or a fake in a test)
+        # could ship guessed addresses as verified with nothing here to
+        # catch it. The ONLY routes to "verified" are `verify()` and an
+        # address already confirmed and billed in a prior run.
+        prior = ctx.contacts.already_resolved(company_id, person.full_name)
+        confirmed = (prior.email if prior is not None
+                     and prior.email_status == "verified" else None)
+        if confirmed and person.email in (None, confirmed):
+            # This exact address was already confirmed and billed in an
+            # earlier run. Verification is charged per address, so
+            # re-asking buys the same answer twice — and a provider that
+            # has gone quiet must not erase what we paid to learn.
+            status, email = "verified", confirmed
+        elif person.email:
+            status = ctx.contact_provider.verify(person.email)
+            email = person.email if status == "verified" else None
+        else:
+            # No address to verify at all.
+            status, email = "not_found", None
 
         resolved = PersonRef(
             full_name=person.full_name, title=person.title,

@@ -133,20 +133,25 @@ def build_context(
         llm=FakeLLM(claims=claims, titles=["backend engineer"]),
         job_board=FakeJobBoardSource(postings),
         contact_provider=FakeContactProvider(
+            # `find()` never returns "verified" here -- real domain search
+            # (Hunter's included) only reports that an address exists, so
+            # the fixture mirrors that contract rather than short-circuiting
+            # it. Every one of these is expected to reach `verify()`; see
+            # `test_the_pipeline_never_trusts_finds_self_reported_verified`.
             people_by_domain={
                 "good.example": [
                     PersonRef("Marisol Okonkwo", "Co-founder & CTO", None,
-                              "m@good.example", "verified"),
+                              "m@good.example", "unverified"),
                     PersonRef("Rita Sourcer", "Technical Recruiter", None, None,
                               "not_found"),
                 ],
                 "thin.example": [
                     PersonRef("Tomas Reyes", "Head of Engineering", None,
-                              "t@thin.example", "verified"),
+                              "t@thin.example", "unverified"),
                 ],
                 "ghost.example": [
                     PersonRef("Some Stranger", "VP Engineering", None,
-                              "s@ghost.example", "verified"),
+                              "s@ghost.example", "unverified"),
                 ],
             },
             credits=credits,

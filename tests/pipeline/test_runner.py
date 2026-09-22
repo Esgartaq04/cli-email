@@ -241,6 +241,7 @@ def test_an_already_resolved_contact_is_not_verified_again():
         PersonRef("Marisol Okonkwo", "Co-founder & CTO", None,
                   "m@good.example", "unverified"),
     ]
+    ctx.contact_provider._people["thin.example"] = []  # keep this test isolated
     ctx.contact_provider = CountingProvider(ctx.contact_provider)
 
     run_pipeline(ctx, "Backend Engineer", "fintech")
@@ -260,8 +261,9 @@ def test_an_already_resolved_contact_is_not_verified_again():
         ("m@good.example", "verified")]
 
 
-def test_verified_with_no_address_is_stored_as_not_found():
-    """A `verified` status with nothing to send to is not a verified contact."""
+def test_no_address_is_stored_as_not_found():
+    """A person with nothing to send to is not a verified contact, no matter
+    what `find()` claims about their status."""
     ctx = build_context()
     ctx.contact_provider._people["good.example"] = [
         PersonRef("Marisol Okonkwo", "Co-founder & CTO", None, None, "verified"),
@@ -272,6 +274,30 @@ def test_verified_with_no_address_is_stored_as_not_found():
     assert [(c.email, c.email_status) for c in ctx.contacts.for_company(good)] == [
         (None, "not_found")]
     assert summary.evidenced == 1
+
+
+def test_the_pipeline_never_trusts_finds_self_reported_verified():
+    """`find()` claiming "verified" must not be trusted directly -- only
+    `verify()` (or an already-confirmed prior result) may set that status.
+
+    A provider whose `find()` lies about being verified, but whose
+    `verify()` correctly disagrees, must end up NOT verified. If the
+    pipeline ever shortcuts on find()'s own status again, this stores a
+    verified address that was never actually confirmed.
+    """
+    ctx = build_context()
+    ctx.contact_provider._people["good.example"] = [
+        PersonRef("Marisol Okonkwo", "Co-founder & CTO", None,
+                  "m@good.example", "verified"),  # find() claims verified...
+    ]
+    ctx.contact_provider._people["thin.example"] = []
+    ctx.contact_provider.verify = lambda email: "unverified"  # ...verify() disagrees
+
+    run_pipeline(ctx, "Backend Engineer", "fintech")
+
+    good = ctx.companies.upsert("good.example", "Good Co", None, None)
+    stored = ctx.contacts.for_company(good)
+    assert [(c.email, c.email_status) for c in stored] == [(None, "unverified")]
 
 
 def test_the_short_circuit_only_covers_the_address_already_paid_for():
