@@ -75,10 +75,10 @@ def test_a_company_whose_research_failed_still_appears_in_the_report(tmp_path):
     assert len(failed) == 1
     assert failed[0].domain == "bad.example"
     assert failed[0].error is not None and "boom" in failed[0].error
-    # Every surface fetch raised before recording an attempt here, so the
-    # coverage log is legitimately empty -- the point is that it is READ
-    # (not omitted), and that the error text is preserved either way.
-    assert failed[0].fetch_log == []
+    # Every REAL surface fetch raised before recording an attempt, so the
+    # only entry is the synthetic GitHub skip -- the point is that the log
+    # is READ at all (not omitted), and the error text is preserved either way.
+    assert failed[0].fetch_log == [("github", "skipped_no_github_org", None)]
 
     path = write_report(view, tmp_path)
     html = path.read_text()

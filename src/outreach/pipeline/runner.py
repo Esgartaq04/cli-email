@@ -260,7 +260,8 @@ def _profile_and_extract(ctx: RunContext, run_id: int, company_id: int,
     company = ctx.companies.get(company_id)
     completed = 0
     errors: list[str] = []
-    for target in surface_targets(company.canonical_domain, github_org=None):
+    github_org = None  # V1 never resolves one; see the skip record below.
+    for target in surface_targets(company.canonical_domain, github_org=github_org):
         try:
             _sweep_surface(ctx, run_id, company_id, company.canonical_domain,
                            target, summary)
@@ -271,6 +272,19 @@ def _profile_and_extract(ctx: RunContext, run_id: int, company_id: int,
             errors.append(f"{target.source_class.value}: {exc}")
             continue
         completed += 1
+
+    if github_org is None:
+        # `surface_targets` silently leaves GitHub out of the list whenever
+        # there's no org to check -- which is always, in V1. Recording that
+        # as a FetchAttempt (rather than nothing at all) makes the gap show
+        # up in the report's coverage log instead of looking like GitHub
+        # was never even considered.
+        try:
+            ctx.fetch_attempts.insert(run_id, FetchAttempt(
+                company_id, SourceClass.GITHUB, "", "skipped_no_github_org", None, 0))
+        except Exception as exc:
+            errors.append(f"github: {exc}")
+
     return _SurfaceSweep(completed=completed, errors=errors)
 
 

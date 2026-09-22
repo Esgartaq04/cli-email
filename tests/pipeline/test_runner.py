@@ -122,6 +122,19 @@ def test_a_malformed_posting_does_not_cost_the_other_companies():
     assert summary.no_bottleneck == 1
 
 
+def test_the_skipped_github_surface_is_recorded_not_invisible():
+    """V1 never resolves a GitHub org, so the surface is always left out of
+    `surface_targets`. That gap must show up in the coverage log as a
+    recorded skip, not vanish as if GitHub were never even considered."""
+    ctx = build_context()
+    summary = run_pipeline(ctx, "Backend Engineer", "fintech")
+    good = ctx.companies.upsert("good.example", "Good Co", None, None)
+    attempts = ctx.fetch_attempts.for_company(summary.run_id, good)
+    github_attempts = [a for a in attempts if a.source_class == SourceClass.GITHUB]
+    assert len(github_attempts) == 1
+    assert github_attempts[0].outcome == "skipped_no_github_org"
+
+
 def test_a_company_whose_domain_was_never_confirmed_is_not_enriched():
     """A guessed Greenhouse-token domain that no surface actually reached
     must never be handed to the contact provider -- a wrong-domain guess
@@ -230,7 +243,9 @@ def test_resuming_after_a_crash_does_not_duplicate_evidence():
     rows = ctx.evidence.for_company(run_id, good)
     assert len(rows) == 3  # not 5
     assert len({r.quote for r in rows}) == 3
-    assert len(ctx.fetch_attempts.for_company(run_id, good)) == 4  # not 6
+    # 4 real surfaces + 1 synthetic "skipped_no_github_org" record; not
+    # doubled to 10 by the interrupted partial attempt.
+    assert len(ctx.fetch_attempts.for_company(run_id, good)) == 5
     assert summary.quotes_accepted == 3
 
 

@@ -209,6 +209,15 @@ def run(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2)
 
+    if not ctx.config.discovery.greenhouse_tokens:
+        # Without this, a first real run silently discovers zero companies
+        # and writes an empty report with no indication why -- config.toml
+        # ships with an empty list, so this is the actual first-run
+        # experience unless someone reads the config file first.
+        typer.echo(
+            "Warning: discovery.greenhouse_tokens is empty in config.toml -- "
+            "this run will discover zero companies.", err=True)
+
     if dry_run:
         terms = ctx.llm.expand_titles(role)
         postings = ctx.job_board.search(terms, ctx.config.discovery.region)

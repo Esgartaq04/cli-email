@@ -18,6 +18,17 @@ def test_company_upsert_is_stable_across_runs(tmp_path):
     assert companies.get(first).headcount == 52
 
 
+def test_upsert_canonicalizes_the_domain_itself(tmp_path):
+    """The choke point is structural, not a convention every caller must
+    remember: a non-canonical domain passed straight to upsert must still
+    land as one canonical row."""
+    companies, _ = repos(tmp_path)
+    first = companies.upsert("https://WWW.Foo.COM/careers", "Foo", 48, "careers page")
+    second = companies.upsert("foo.com", "Foo Inc", None, None)
+    assert first == second
+    assert companies.get(first).canonical_domain == "foo.com"
+
+
 def test_contact_resolved_in_earlier_run_is_found_again(tmp_path):
     companies, contacts = repos(tmp_path)
     cid = companies.upsert("foo.com", "Foo", 48, "careers page")

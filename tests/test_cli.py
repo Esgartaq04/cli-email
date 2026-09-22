@@ -27,6 +27,18 @@ def test_dry_run_reports_planned_spend_and_writes_no_report(tmp_path, monkeypatc
     assert "would use" in result.output.lower()
 
 
+def test_empty_greenhouse_tokens_warns_instead_of_silently_finding_nothing(monkeypatch):
+    """config.toml ships with `greenhouse_tokens = []` -- without a warning,
+    a first real run silently discovers zero companies and writes an empty
+    report with no indication why."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setenv("HUNTER_API_KEY", "test")
+    monkeypatch.setenv("OUTREACH_FAKE_ADAPTERS", "1")
+    result = runner.invoke(app, ["run", "--role", "Backend Engineer",
+                                 "--sector", "fintech", "--dry-run"])
+    assert "greenhouse_tokens is empty" in result.output
+
+
 def test_dry_run_guards_remaining_credits_and_reports_incomplete_estimate(monkeypatch):
     """The credit check is the one thing --dry-run exists to report safely.
 

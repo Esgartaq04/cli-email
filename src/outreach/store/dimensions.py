@@ -4,6 +4,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime
 
+from outreach.core.dedupe import canonical_domain
 from outreach.types import Company, Contact, PersonRef, SourceClass, SourceDocument
 
 
@@ -18,6 +19,11 @@ class CompanyRepo:
     def upsert(
         self, domain: str, name: str, headcount: int | None, headcount_source: str | None
     ) -> int:
+        # Domain variants are the main way one company gets researched (and
+        # billed) twice. Callers already canonicalize before reaching here,
+        # but making this the choke point rather than a convention every
+        # caller must remember is what actually guarantees it.
+        domain = canonical_domain(domain)
         self.conn.execute(
             """INSERT INTO companies (canonical_domain, name, headcount, headcount_source)
                VALUES (?, ?, ?, ?)
