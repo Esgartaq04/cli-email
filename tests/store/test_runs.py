@@ -28,3 +28,47 @@ def test_pending_companies_excludes_completed_ones(tmp_path):
     runs.set_stage(rid, b, "discover", "ok")
     runs.set_stage(rid, a, "contacts", "ok")
     assert runs.pending_companies(rid, "contacts") == [b]
+
+
+def test_clear_for_company_is_scoped_to_one_run_and_one_company(tmp_path):
+    """Re-running a stage must drop only that company's rows for that run."""
+    from datetime import date
+
+    from outreach.store.dimensions import DocumentRepo
+    from outreach.store.runs import EvidenceRepo, FetchAttemptRepo
+    from outreach.types import EvidenceItem, FetchAttempt, SourceClass, SourceDocument
+
+    conn = connect(tmp_path / "t.db")
+    companies, runs = CompanyRepo(conn), RunRepo(conn)
+    evidence, attempts = EvidenceRepo(conn), FetchAttemptRepo(conn)
+    a = companies.upsert("a.example", "A", 40, "careers")
+    b = companies.upsert("b.example", "B", 60, "careers")
+    doc_id = DocumentRepo(conn).insert(SourceDocument(
+        None, a, "https://a.example/blog", SourceClass.ENG_BLOG, "a.example",
+        date(2026, 9, 1), datetime.now(), 200, "hash"))
+    r1 = runs.create("Backend Engineer", "fintech", "US", (20, 1000), datetime.now())
+    r2 = runs.create("Backend Engineer", "fintech", "US", (20, 1000), datetime.now())
+
+    def item(company_id):
+        return EvidenceItem(None, company_id, doc_id, "claim", "quote",
+                            SourceClass.ENG_BLOG, "a.example", date(2026, 9, 1), "t")
+
+    def attempt(company_id):
+        return FetchAttempt(company_id, SourceClass.ENG_BLOG,
+                            "https://a.example/blog", "ok", 200, 1)
+
+    for run_id, company_id in ((r1, a), (r1, b), (r2, a)):
+        evidence.insert(run_id, item(company_id))
+        attempts.insert(run_id, attempt(company_id))
+
+    assert evidence.clear_for_company(r1, a) == 1
+    assert attempts.clear_for_company(r1, a) == 1
+
+    assert evidence.for_company(r1, a) == []
+    assert attempts.for_company(r1, a) == []
+    assert len(evidence.for_company(r1, b)) == 1   # sibling company untouched
+    assert len(attempts.for_company(r1, b)) == 1
+    assert len(evidence.for_company(r2, a)) == 1   # earlier run untouched
+    assert len(attempts.for_company(r2, a)) == 1
+
+    assert evidence.clear_for_company(r1, a) == 0  # idempotent

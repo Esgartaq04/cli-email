@@ -4,18 +4,23 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Sequence
 
-from outreach.contacts.quota import allocate_quota
+from outreach.contacts.quota import QuotaPlan, allocate_quota
 from outreach.core.clustering import cluster_by_theme
-from outreach.core.dedupe import dedupe_postings
+from outreach.core.dedupe import canonical_domain
 from outreach.core.gate import GateVerdict, evaluate
 from outreach.core.ranking import rank_contacts
 from outreach.extraction.extract import extract_and_persist
 from outreach.pipeline.context import RunContext
+from outreach.sources.base import SurfaceTarget
 from outreach.sources.surfaces.standard import surface_targets
 from outreach.types import (Bottleneck, EvidenceItem, FetchAttempt, PersonRef,
-                            SourceClass, SourceDocument)
+                            PostingRef, SourceClass, SourceDocument)
 
-STAGES = ("discover", "profile", "contacts", "evidence", "synthesize")
+# The stage names this runner actually checkpoints, in the order it writes
+# them. There is no separate "profile" checkpoint: profiling a company is
+# the first half of the evidence stage and shares its fate, so a resume that
+# trusted a "profile: ok" row would have nothing to skip.
+STAGES = ("discover", "evidence", "contacts", "synthesize")
 
 # Surfaces that describe a company's CURRENT state rather than a dated
 # archive. For these the fetch date is an honest publication date: a
@@ -53,10 +58,16 @@ def run_pipeline(
     """Six stages, per-company isolation. One bad domain never costs the others.
 
     Every per-company step is wrapped: a failure becomes a `failed` stage
-    row and an entry in `summary.errors`, and the loop moves on. Run-level
-    setup (creating the run, asking the job board for postings) is
-    deliberately NOT swallowed — there is no partial result to salvage when
-    those fail, and a silent empty run would be worse than a traceback.
+    row and an entry in `summary.errors`, and the loop moves on.
+
+    The only calls left unswallowed are the three that run BEFORE any
+    per-company work and decide whether there is a run at all:
+    `runs.create`, `llm.expand_titles` and `job_board.search`. If one of
+    those fails there is no partial result to salvage, and a silently empty
+    run would be worse than a traceback. Everything after them — including
+    `contact_provider.remaining_credits` and the closing `runs.finish` — is
+    guarded, because by then the run has already spent money and computed a
+    summary that the caller must get back.
     """
     run_id = resume_run_id or ctx.runs.create(
         role_title, sector, ctx.config.discovery.region,
@@ -69,7 +80,7 @@ def run_pipeline(
     terms = ctx.llm.expand_titles(role_title)
     postings = ctx.job_board.search(terms, ctx.config.discovery.region)
     company_ids: list[int] = []
-    for domain, group in dedupe_postings(postings).items():
+    for domain, group in _group_by_domain(postings, summary).items():
         try:
             company_id = ctx.companies.upsert(domain, group[0].company_name, None, None)
         except Exception as exc:  # one unusable domain is not a dead run
@@ -85,23 +96,51 @@ def run_pipeline(
         if ctx.runs.stage_status(run_id, company_id, "evidence") == "ok":
             continue
         try:
-            _profile_and_extract(ctx, run_id, company_id, summary)
-            ctx.runs.set_stage(run_id, company_id, "evidence", "ok")
+            # This company's stage is about to be re-derived from scratch,
+            # so drop whatever a previous partial attempt left behind.
+            # `evidence_items` has no unique key, so without this a resume
+            # doubles the rows and the report cites the same quote twice.
+            ctx.evidence.clear_for_company(run_id, company_id)
+            ctx.fetch_attempts.clear_for_company(run_id, company_id)
+            result = _profile_and_extract(ctx, run_id, company_id, summary)
         except Exception as exc:  # one company's failure is data, not a crash
             summary.failures += 1
             summary.errors.append(f"evidence {company_id}: {exc}")
             ctx.runs.set_stage(run_id, company_id, "evidence", "failed", error=str(exc))
+            continue
+
+        joined = "; ".join(result.errors)
+        summary.errors.extend(f"evidence {company_id}: {e}" for e in result.errors)
+        if result.completed or not result.errors:
+            # At least one surface was reached. Partial evidence is still
+            # evidence: a company whose changelog 500s but whose blog
+            # answered has earned its trip to the gate.
+            ctx.runs.set_stage(run_id, company_id, "evidence", "ok",
+                               error=joined or None)
+        else:
+            summary.failures += 1
+            ctx.runs.set_stage(run_id, company_id, "evidence", "failed", error=joined)
 
     # --- contacts (quota-aware) -----------------------------------------
     pending = [c for c in company_ids
                if ctx.runs.stage_status(run_id, c, "contacts") != "ok"]
-    plan = allocate_quota(pending, ctx.contact_provider.remaining_credits())
+    try:
+        plan = allocate_quota(pending, ctx.contact_provider.remaining_credits())
+    except Exception as exc:
+        # Asking the provider how much budget is left is a network call for
+        # a real adapter. Losing it costs us the contacts stage, not the
+        # evidence we have already paid to gather.
+        summary.errors.append(f"contacts: {exc}")
+        for company_id in pending:
+            summary.failures += 1
+            ctx.runs.set_stage(run_id, company_id, "contacts", "failed", error=str(exc))
+        plan = QuotaPlan(process=[], skipped=[])
     for company_id in plan.skipped:
         ctx.runs.set_stage(run_id, company_id, "contacts", "skipped_quota")
         summary.skipped_quota += 1
     for company_id in plan.process:
         try:
-            _resolve_contacts(ctx, run_id, company_id, role_title)
+            _resolve_contacts(ctx, company_id, role_title)
             ctx.runs.set_stage(run_id, company_id, "contacts", "ok")
         except Exception as exc:
             summary.failures += 1
@@ -126,53 +165,123 @@ def run_pipeline(
             ctx.runs.set_stage(run_id, company_id, "synthesize", "failed",
                                error=str(exc))
 
-    ctx.runs.finish(run_id, datetime.now())
+    try:
+        ctx.runs.finish(run_id, datetime.now())
+    except Exception as exc:
+        # The run is over and the summary is complete. Failing to stamp the
+        # runs row is worth reporting, but losing the summary over it would
+        # throw away everything the run just paid for.
+        summary.errors.append(f"finish {run_id}: {exc}")
     return summary
 
 
-def _profile_and_extract(ctx: RunContext, run_id: int, company_id: int,
-                         summary: RunSummary) -> None:
-    company = ctx.companies.get(company_id)
-    for target in surface_targets(company.canonical_domain, github_org=None):
-        outcome = ctx.fetcher.get(target.url)
-        if outcome.outcome != "ok" or not outcome.body:
-            ctx.fetch_attempts.insert(run_id, FetchAttempt(
-                company_id, target.source_class, target.url,
-                outcome.outcome, outcome.status, 0))
+def _group_by_domain(
+    postings: Sequence[PostingRef], summary: RunSummary
+) -> dict[str, list[PostingRef]]:
+    """Group postings by canonical domain, skipping the ones that cannot be.
+
+    `dedupe_postings` canonicalizes the whole batch in one pass, so a single
+    posting with an empty or hostless domain raises out of it and takes the
+    entire run with it — before any company has been touched. Canonicalizing
+    one posting at a time keeps that blast radius to the one bad posting.
+    """
+    grouped: dict[str, list[PostingRef]] = {}
+    for posting in postings:
+        try:
+            domain = canonical_domain(posting.company_domain)
+        except Exception as exc:
+            summary.failures += 1
+            summary.errors.append(
+                f"discover {posting.company_name!r} "
+                f"({posting.company_domain!r}): {exc}")
             continue
+        grouped.setdefault(domain, []).append(posting)
+    return grouped
 
-        content_hash = ctx.cache.store(outcome.body.encode("utf-8"))
-        published_at = (
-            ctx.today if target.source_class in CURRENT_STATE_CLASSES else None
-        )
-        doc = SourceDocument(None, company_id, target.url, target.source_class,
-                             company.canonical_domain, published_at, datetime.now(),
-                             outcome.status or 200, content_hash)
-        doc_id = ctx.documents.insert(doc)
+
+@dataclass(frozen=True)
+class _SurfaceSweep:
+    """How a company's surfaces fared: how many were reached, and what broke."""
+    completed: int
+    errors: list[str]
+
+
+def _profile_and_extract(ctx: RunContext, run_id: int, company_id: int,
+                         summary: RunSummary) -> _SurfaceSweep:
+    company = ctx.companies.get(company_id)
+    completed = 0
+    errors: list[str] = []
+    for target in surface_targets(company.canonical_domain, github_org=None):
+        try:
+            _sweep_surface(ctx, run_id, company_id, company.canonical_domain,
+                           target, summary)
+        except Exception as exc:
+            # One surface is not the company. A blog that raises must not
+            # discard the changelog evidence that would have cleared the
+            # gate on its own.
+            errors.append(f"{target.source_class.value}: {exc}")
+            continue
+        completed += 1
+    return _SurfaceSweep(completed=completed, errors=errors)
+
+
+def _sweep_surface(ctx: RunContext, run_id: int, company_id: int, domain: str,
+                   target: SurfaceTarget, summary: RunSummary) -> None:
+    outcome = ctx.fetcher.get(target.url)
+    if outcome.outcome != "ok" or not outcome.body:
         ctx.fetch_attempts.insert(run_id, FetchAttempt(
-            company_id, target.source_class, target.url, "ok", outcome.status, 1))
+            company_id, target.source_class, target.url,
+            outcome.outcome, outcome.status, 0))
+        return
 
-        result = extract_and_persist(run_id, doc, outcome.body, ctx.llm,
-                                     ctx.evidence, document_id=doc_id)
-        summary.quotes_accepted += result.accepted
-        summary.quotes_rejected += result.rejected
+    content_hash = ctx.cache.store(outcome.body.encode("utf-8"))
+    published_at = (
+        ctx.today if target.source_class in CURRENT_STATE_CLASSES else None
+    )
+    doc = SourceDocument(None, company_id, target.url, target.source_class,
+                         domain, published_at, datetime.now(),
+                         outcome.status or 200, content_hash)
+    doc_id = ctx.documents.insert(doc)
+    ctx.fetch_attempts.insert(run_id, FetchAttempt(
+        company_id, target.source_class, target.url, "ok", outcome.status, 1))
+
+    result = extract_and_persist(run_id, doc, outcome.body, ctx.llm,
+                                 ctx.evidence, document_id=doc_id)
+    summary.quotes_accepted += result.accepted
+    summary.quotes_rejected += result.rejected
 
 
-def _resolve_contacts(ctx: RunContext, run_id: int, company_id: int,
-                      role_title: str) -> None:
+def _resolve_contacts(ctx: RunContext, company_id: int, role_title: str) -> None:
     company = ctx.companies.get(company_id)
     keywords = role_title.lower().split()
     people = ctx.contact_provider.find(company.canonical_domain, keywords)
     for person, _score in rank_contacts(people, company.headcount, keywords,
                                         ctx.config.ranking):
         status = person.email_status
-        if person.email and status != "verified":
-            status = ctx.contact_provider.verify(person.email)
+        email = person.email if status == "verified" else None
+        if status == "verified" and not email:
+            # A provider claiming "verified" with no address has verified
+            # nothing. Stored as-is it would print as a verified contact in
+            # the report with nothing to send to.
+            status = "not_found"
+
+        if status != "verified":
+            prior = ctx.contacts.already_resolved(company_id, person.full_name)
+            confirmed = (prior.email if prior is not None
+                         and prior.email_status == "verified" else None)
+            if confirmed and person.email in (None, confirmed):
+                # This exact address was already confirmed and billed in an
+                # earlier run. Verification is charged per address, so
+                # re-asking buys the same answer twice — and a provider that
+                # has gone quiet must not erase what we paid to learn.
+                status, email = "verified", confirmed
+            elif person.email:
+                status = ctx.contact_provider.verify(person.email)
+                email = person.email if status == "verified" else None
+
         resolved = PersonRef(
             full_name=person.full_name, title=person.title,
-            profile_url=person.profile_url,
-            email=person.email if status == "verified" else None,
-            email_status=status,
+            profile_url=person.profile_url, email=email, email_status=status,
         )
         ctx.contacts.upsert(company_id, resolved, "provider", datetime.now())
 

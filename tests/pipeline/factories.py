@@ -78,6 +78,7 @@ def build_context(
     credits: int = 10,
     explode_on_domain: str | None = None,
     include_invented_quote: bool = False,
+    include_malformed_posting: bool = False,
 ) -> RunContext:
     root = Path(tempfile.mkdtemp())
     conn = connect(root / "t.db")
@@ -99,7 +100,14 @@ def build_context(
                                "We are migrating everything to Kubernetes.",
                                "infra-migration"))
 
-    postings = [
+    postings = []
+    if include_malformed_posting:
+        # A board that returns a posting with no usable domain at all.
+        # Deliberately FIRST, so a run that canonicalizes the batch in one
+        # pass dies before it reaches either healthy company.
+        postings.append(
+            PostingRef("Broken Co", "", "Backend Engineer", "u0", "Remote"))
+    postings += [
         PostingRef("Good Co", "good.example", "Backend Engineer", "u1", "Chicago, IL"),
         PostingRef("Thin Co", "thin.example", "Backend Engineer", "u2", "Austin, TX"),
     ]

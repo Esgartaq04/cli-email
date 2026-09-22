@@ -74,6 +74,22 @@ class EvidenceRepo:
         self.conn.commit()
         return int(cur.lastrowid)
 
+    def clear_for_company(self, run_id: int, company_id: int) -> int:
+        """Drop this run's evidence for one company; return the rows removed.
+
+        Re-running a company's evidence stage after a partial failure
+        re-extracts every surface, and `evidence_items` has no unique key to
+        absorb that. Without a delete path a resume silently doubles the
+        rows, so the report cites the same quote twice and `quotes_accepted`
+        is inflated. Scoped to (run_id, company_id): no other company's
+        evidence and no earlier run is touched.
+        """
+        cur = self.conn.execute(
+            "DELETE FROM evidence_items WHERE run_id = ? AND company_id = ?",
+            (run_id, company_id))
+        self.conn.commit()
+        return int(cur.rowcount)
+
     def for_company(self, run_id: int, company_id: int) -> list[EvidenceItem]:
         rows = self.conn.execute(
             "SELECT * FROM evidence_items WHERE run_id=? AND company_id=? ORDER BY id",
@@ -128,6 +144,19 @@ class FetchAttemptRepo:
              attempt.outcome, attempt.http_status, attempt.document_count),
         )
         self.conn.commit()
+
+    def clear_for_company(self, run_id: int, company_id: int) -> int:
+        """Drop this run's fetch attempts for one company; return rows removed.
+
+        The companion to `EvidenceRepo.clear_for_company`: a re-run refetches
+        every surface, so the old attempt rows would otherwise accumulate and
+        the diagnostics would show one surface tried twice as often as it was.
+        """
+        cur = self.conn.execute(
+            "DELETE FROM fetch_attempts WHERE run_id = ? AND company_id = ?",
+            (run_id, company_id))
+        self.conn.commit()
+        return int(cur.rowcount)
 
     def for_company(self, run_id: int, company_id: int) -> list[FetchAttempt]:
         rows = self.conn.execute(
