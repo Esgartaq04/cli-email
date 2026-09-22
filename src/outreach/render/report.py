@@ -52,6 +52,7 @@ class ReportView:
     evidenced: list[ReportCompany]
     no_bottleneck: list[ReportCompany]
     diagnostics: dict[str, str]
+    errors: list[str] = field(default_factory=list)
 
 
 _env = Environment(
@@ -63,18 +64,29 @@ _env = Environment(
     autoescape=True,
 )
 
+# Surfaces whose `published_at` is stamped with the fetch date -- an honest
+# "true as of today" for a careers/job/status page, not a parsed publication
+# date. Rendered identically to a real date, "21 Sep 2026" under a careers-
+# page quote reads as "I saw this posted that day," when the page could be
+# eighteen months stale. Mirrors runner.py's CURRENT_STATE_CLASSES by value
+# rather than importing it, since render/ has no reason to depend on
+# pipeline/ for three string constants.
+CURRENT_STATE_CLASSES = frozenset({"careers_page", "job_posting", "status_page"})
+
 REASON_TEXT = {
     "no_evidence": "no claims survived extraction",
     "insufficient_independent_sources": "fewer than two independent sources",
     "no_first_party_source": "no first-party source",
     "all_evidence_stale": "nothing inside the recency window",
     "evidence_split_across_themes": "evidence spread across unrelated themes, none corroborated",
+    "research_failed": "research could not be completed",
 }
 
 
 def render_report(view: ReportView) -> str:
     template = _env.get_template("report.html.j2")
-    return template.render(view=view, reason_text=REASON_TEXT)
+    return template.render(view=view, reason_text=REASON_TEXT,
+                           current_state_classes=CURRENT_STATE_CLASSES)
 
 
 def _slugify(text: str) -> str:

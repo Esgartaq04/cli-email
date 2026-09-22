@@ -144,7 +144,6 @@
   <h1>{{ view.role_title }} · {{ view.sector }}</h1>
   <div class="run-meta">
     <span>{{ view.run_date.strftime('%d %b %Y') }}</span>
-    <span>headcount {{ view.headcount_min }}–{{ view.headcount_max }}</span>
     <span>{{ view.evidenced|length + view.no_bottleneck|length }} companies</span>
     <span>{{ view.evidenced|length }} evidenced</span>
     <span>{{ view.no_bottleneck|length }} no bottleneck</span>
@@ -201,7 +200,10 @@
     <div class="ev-meta">
       <span class="badge{% if e.source_class == 'news' %} third{% endif %}">
         {{ e.source_class.replace('_', ' ') }}</span>
-      <span>{% if e.published_at %}{{ e.published_at.strftime('%d %b %Y') }}
+      <span>{% if e.published_at %}
+              {% if e.source_class in current_state_classes %}
+                current as of {{ e.published_at.strftime('%d %b') }}
+              {% else %}{{ e.published_at.strftime('%d %b %Y') }}{% endif %}
             {% else %}undated{% endif %}</span>
       <a href="{{ e.url }}">{{ e.url }}</a>
     </div>
@@ -232,9 +234,15 @@
     {% endfor %}
   </div>
   {% endif %}
+  {% if company.reason == 'research_failed' %}
+  <p class="why-none"><strong>Research failed:</strong>
+    {{ reason_text.get(company.reason, company.reason) }}
+    ({{ company.reason }}){% if company.error %} — {{ company.error }}{% endif %}.</p>
+  {% else %}
   <p class="why-none"><strong>Gate failed:</strong>
     {{ reason_text.get(company.reason, company.reason) }}
     ({{ company.reason }}).</p>
+  {% endif %}
   {{ contacts_block(company) }}
 </article>
 {% endfor %}
@@ -246,6 +254,11 @@
     <div class="diag-item"><div class="k">{{ key }}</div><div class="v">{{ value }}</div></div>
     {% endfor %}
   </div>
+  {% if view.errors %}
+  <div class="diag-err">
+    {% for e in view.errors %}<div>{{ e }}</div>{% endfor %}
+  </div>
+  {% endif %}
 </footer>
 
 </div>

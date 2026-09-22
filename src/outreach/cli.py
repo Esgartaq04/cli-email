@@ -8,8 +8,8 @@ import httpx
 import typer
 from dotenv import load_dotenv
 
-from outreach.config import ConfigError, load_config, require_env
-from outreach.core.ranking import score_title
+from outreach.config import Config, ConfigError, load_config, require_env
+from outreach.core.ranking import rank_contacts
 from outreach.net.fetcher import Fetcher
 from outreach.pipeline.context import RunContext
 from outreach.pipeline.runner import RunSummary, run_pipeline
@@ -19,6 +19,7 @@ from outreach.store.cache import DocumentCache
 from outreach.store.db import connect
 from outreach.store.dimensions import CompanyRepo, ContactRepo, DocumentRepo
 from outreach.store.runs import BottleneckRepo, EvidenceRepo, FetchAttemptRepo, RunRepo
+from outreach.types import Company, Contact, PersonRef
 
 app = typer.Typer(help="Outreach research pipeline")
 
@@ -57,6 +58,37 @@ def build_context(config_path: Path = Path("config.toml")) -> RunContext:
     )
 
 
+def _rank_and_cap_contacts(
+    stored: list[Contact], company: Company, keywords: list[str], config: Config
+) -> list[ReportContact]:
+    """Re-rank and cap `contacts.for_company` on read, per run.
+
+    `contacts.for_company` is company-scoped, not run-scoped: it returns
+    every contact ever stored for this company across every past run, and
+    `max_contacts_per_company` is applied only when a run WRITES contacts
+    (`rank_contacts` in `_resolve_contacts`), never when the report reads
+    them back. After a few runs a card could list far more than the
+    configured cap, including people surfaced under a different `--role`
+    whose title no longer scores against these keywords. Re-ranking and
+    truncating here, against THIS run's role, is what keeps the card
+    honest regardless of how many runs have touched this company.
+    """
+    by_name = {c.full_name: c for c in stored}
+    people = [PersonRef(c.full_name, c.title, c.profile_url, c.email, c.email_status)
+              for c in stored]
+    ranked = rank_contacts(people, company.headcount, keywords, config.ranking)
+
+    contacts: list[ReportContact] = []
+    for person, score in ranked:
+        why = score.explanation
+        orig = by_name.get(person.full_name)
+        if orig and orig.contacted_at:
+            why += f" · emailed {orig.contacted_at:%d %b}"
+        contacts.append(ReportContact(person.full_name, person.title, person.email,
+                                      person.email_status, person.profile_url, why))
+    return contacts
+
+
 def build_view(ctx: RunContext, summary: RunSummary, fresh: bool = True) -> ReportView:
     """Assemble the report view model from persisted rows.
 
@@ -73,6 +105,7 @@ def build_view(ctx: RunContext, summary: RunSummary, fresh: bool = True) -> Repo
     run_id = summary.run_id
     evidenced: list[ReportCompany] = []
     no_bottleneck: list[ReportCompany] = []
+    handled_company_ids: set[int] = set()
 
     for bottleneck in ctx.bottlenecks.for_run(run_id):
         company = ctx.companies.get(bottleneck.company_id)
@@ -85,17 +118,8 @@ def build_view(ctx: RunContext, summary: RunSummary, fresh: bool = True) -> Repo
             if item.id in keep
         ]
         keywords = summary.role_title.lower().split()
-        contacts = []
-        for c in ctx.contacts.for_company(bottleneck.company_id):
-            # The ranking explanation is a pure function of title and headcount,
-            # so recompute it here rather than storing a derived string.
-            score = score_title(c.title, company.headcount, keywords,
-                                ctx.config.ranking)
-            why = score.explanation if score else "ranking unavailable"
-            if c.contacted_at:
-                why += f" · emailed {c.contacted_at:%d %b}"
-            contacts.append(ReportContact(c.full_name, c.title, c.email,
-                                          c.email_status, c.profile_url, why))
+        contacts = _rank_and_cap_contacts(
+            ctx.contacts.for_company(bottleneck.company_id), company, keywords, ctx.config)
         fetch_log = [
             (a.source_class.value, a.outcome, a.http_status)
             for a in ctx.fetch_attempts.for_company(run_id, bottleneck.company_id)
@@ -110,6 +134,31 @@ def build_view(ctx: RunContext, summary: RunSummary, fresh: bool = True) -> Repo
             domain_confirmed=contacts_stage != "skipped_domain_unconfirmed",
         )
         (evidenced if bottleneck.passed else no_bottleneck).append(card)
+        handled_company_ids.add(bottleneck.company_id)
+
+    # A company whose research never completed gets no `bottlenecks` row at
+    # all (by design -- recording a verdict about work never done would be
+    # a lie). Without this pass it simply vanishes from the report: the
+    # only trace left is a mismatch between the header's company count and
+    # the diagnostics. `run_companies` is the complete list of companies
+    # this run touched, so anything in it with no bottleneck row is a
+    # research failure, surfaced with its coverage log and error text.
+    for company_id in ctx.runs.companies_for_run(run_id):
+        if company_id in handled_company_ids:
+            continue
+        company = ctx.companies.get(company_id)
+        fetch_log = [
+            (a.source_class.value, a.outcome, a.http_status)
+            for a in ctx.fetch_attempts.for_company(run_id, company_id)
+        ]
+        error = (ctx.runs.stage_error(run_id, company_id, "evidence")
+                 or ctx.runs.stage_error(run_id, company_id, "discover"))
+        no_bottleneck.append(ReportCompany(
+            name=company.name, domain=company.canonical_domain,
+            headcount=company.headcount, headcount_source=company.headcount_source,
+            claim="", summary="", reason="research_failed",
+            evidence=[], contacts=[], fetch_log=fetch_log, error=error,
+        ))
 
     # Smallest and most bypassable first; unknown headcount sorts last.
     evidenced.sort(key=lambda c: (c.headcount is None, c.headcount or 0))
@@ -121,6 +170,9 @@ def build_view(ctx: RunContext, summary: RunSummary, fresh: bool = True) -> Repo
         headcount_min=ctx.config.discovery.headcount_min,
         headcount_max=ctx.config.discovery.headcount_max,
         evidenced=evidenced, no_bottleneck=no_bottleneck,
+        # Errors aren't persisted past the run that produced them either --
+        # same "not recorded" honesty as the diagnostics values below.
+        errors=summary.errors if fresh else ["not recorded"],
         diagnostics={
             "Companies discovered": str(summary.companies),
             "Bottlenecks passed": f"{summary.evidenced} / {summary.companies}",
@@ -130,6 +182,16 @@ def build_view(ctx: RunContext, summary: RunSummary, fresh: bool = True) -> Repo
             "Skipped — domain unconfirmed": (
                 str(summary.skipped_domain_unconfirmed) if fresh else not_recorded),
             "Company failures": str(summary.failures) if fresh else not_recorded,
+            "Wall clock (s)": (
+                f"{summary.wall_clock_seconds:.1f}"
+                if fresh and summary.wall_clock_seconds is not None else not_recorded),
+            "Enrichment credits remaining": (
+                str(summary.credits_after)
+                if fresh and summary.credits_after is not None else not_recorded),
+            "Enrichment credits consumed": (
+                str(summary.credits_before - summary.credits_after)
+                if fresh and summary.credits_before is not None
+                and summary.credits_after is not None else not_recorded),
         },
     )
 

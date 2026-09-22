@@ -44,6 +44,27 @@ class RunRepo:
             (run_id, company_id, stage)).fetchone()
         return row["status"] if row else None
 
+    def companies_for_run(self, run_id: int) -> list[int]:
+        """Every company this run ever touched, in company-id order.
+
+        `run_companies` has a row for a company the moment `discover`
+        checkpoints it, whether or not it ever earns a `bottlenecks` row --
+        so this is the only complete list of companies a run researched.
+        Without it, a company whose every surface failed has no trace left
+        in the report at all: `bottlenecks` never gets a row for it (by
+        design -- see runner.py), and nothing else reads this table.
+        """
+        rows = self.conn.execute(
+            "SELECT DISTINCT company_id FROM run_companies WHERE run_id = ? "
+            "ORDER BY company_id", (run_id,)).fetchall()
+        return [int(r["company_id"]) for r in rows]
+
+    def stage_error(self, run_id: int, company_id: int, stage: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT error FROM run_companies WHERE run_id=? AND company_id=? AND stage=?",
+            (run_id, company_id, stage)).fetchone()
+        return row["error"] if row else None
+
     def pending_companies(self, run_id: int, stage: str) -> list[int]:
         """Companies that reached the run but have no successful row for `stage`."""
         rows = self.conn.execute(

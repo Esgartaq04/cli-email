@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Sequence
@@ -52,6 +53,9 @@ class RunSummary:
     skipped_domain_unconfirmed: int = 0
     failures: int = 0
     errors: list[str] = field(default_factory=list)
+    wall_clock_seconds: float | None = None
+    credits_before: int | None = None
+    credits_after: int | None = None
 
 
 def run_pipeline(
@@ -71,6 +75,7 @@ def run_pipeline(
     guarded, because by then the run has already spent money and computed a
     summary that the caller must get back.
     """
+    started = time.perf_counter()
     run_id = resume_run_id or ctx.runs.create(
         role_title, sector, ctx.config.discovery.region,
         (ctx.config.discovery.headcount_min, ctx.config.discovery.headcount_max),
@@ -152,7 +157,8 @@ def run_pipeline(
                 summary.errors.append(f"contacts {company_id}: {exc}")
             summary.skipped_domain_unconfirmed += 1
     try:
-        plan = allocate_quota(pending, ctx.contact_provider.remaining_credits())
+        summary.credits_before = ctx.contact_provider.remaining_credits()
+        plan = allocate_quota(pending, summary.credits_before)
     except Exception as exc:
         # Asking the provider how much budget is left is a network call for
         # a real adapter. Losing it costs us the contacts stage, not the
@@ -181,6 +187,14 @@ def run_pipeline(
             summary.errors.append(f"contacts {company_id}: {exc}")
             ctx.runs.set_stage(run_id, company_id, "contacts", "failed", error=str(exc))
 
+    try:
+        summary.credits_after = ctx.contact_provider.remaining_credits()
+    except Exception as exc:
+        # Diagnostics-only: the contacts stage itself already completed (or
+        # already recorded its own failure) above, so losing this second
+        # balance check must not touch anything the run already did.
+        summary.errors.append(f"contacts credits_after: {exc}")
+
     # --- gate + synthesize ----------------------------------------------
     for company_id in company_ids:
         if ctx.runs.stage_status(run_id, company_id, "evidence") != "ok":
@@ -206,6 +220,7 @@ def run_pipeline(
         # runs row is worth reporting, but losing the summary over it would
         # throw away everything the run just paid for.
         summary.errors.append(f"finish {run_id}: {exc}")
+    summary.wall_clock_seconds = time.perf_counter() - started
     return summary
 
 

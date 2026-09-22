@@ -18,6 +18,51 @@ def test_stage_checkpoint_round_trips(tmp_path):
     assert runs.stage_status(rid, cid, "profile") == "failed"
 
 
+def test_companies_for_run_lists_every_company_the_run_touched(tmp_path):
+    """The complete list of companies a run researched, whether or not a
+    company ever earned a bottlenecks row -- the only way a report can
+    surface a company whose research failed entirely."""
+    conn = connect(tmp_path / "t.db")
+    companies, runs = CompanyRepo(conn), RunRepo(conn)
+    a = companies.upsert("a.example", "A", 40, "careers")
+    b = companies.upsert("b.example", "B", 60, "careers")
+    rid = runs.create("Backend Engineer", "fintech", "US", (20, 1000), datetime.now())
+    runs.set_stage(rid, a, "discover", "ok")
+    runs.set_stage(rid, b, "discover", "ok")
+    runs.set_stage(rid, a, "evidence", "failed", error="boom")
+    assert runs.companies_for_run(rid) == [a, b]
+
+
+def test_companies_for_run_is_scoped_to_its_own_run(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    companies, runs = CompanyRepo(conn), RunRepo(conn)
+    a = companies.upsert("a.example", "A", 40, "careers")
+    r1 = runs.create("Backend Engineer", "fintech", "US", (20, 1000), datetime.now())
+    r2 = runs.create("Backend Engineer", "fintech", "US", (20, 1000), datetime.now())
+    runs.set_stage(r1, a, "discover", "ok")
+    assert runs.companies_for_run(r1) == [a]
+    assert runs.companies_for_run(r2) == []
+
+
+def test_stage_error_returns_the_recorded_error_text(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    companies, runs = CompanyRepo(conn), RunRepo(conn)
+    a = companies.upsert("a.example", "A", 40, "careers")
+    rid = runs.create("Backend Engineer", "fintech", "US", (20, 1000), datetime.now())
+    runs.set_stage(rid, a, "evidence", "failed", error="boom")
+    assert runs.stage_error(rid, a, "evidence") == "boom"
+
+
+def test_stage_error_is_none_for_a_stage_never_written_or_without_an_error(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    companies, runs = CompanyRepo(conn), RunRepo(conn)
+    a = companies.upsert("a.example", "A", 40, "careers")
+    rid = runs.create("Backend Engineer", "fintech", "US", (20, 1000), datetime.now())
+    assert runs.stage_error(rid, a, "evidence") is None
+    runs.set_stage(rid, a, "evidence", "ok")
+    assert runs.stage_error(rid, a, "evidence") is None
+
+
 def test_pending_companies_excludes_completed_ones(tmp_path):
     conn = connect(tmp_path / "t.db")
     companies, runs = CompanyRepo(conn), RunRepo(conn)
