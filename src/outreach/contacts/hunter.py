@@ -8,6 +8,19 @@ from outreach.types import EmailStatus, PersonRef
 
 _BASE_URL = "https://api.hunter.io/v2"
 
+# `profile_url` reaches an `href` in the report. Jinja's autoescape stops
+# attribute breakout, but not a `javascript:` (or other non-http) scheme --
+# that needs an explicit allowlist. Evidence URLs don't need this: they are
+# always built from `canonical_domain`, never taken verbatim from a
+# third-party API response.
+_SAFE_URL_SCHEMES = ("http://", "https://")
+
+
+def _safe_profile_url(value: object) -> str | None:
+    if not isinstance(value, str) or not value.startswith(_SAFE_URL_SCHEMES):
+        return None
+    return value
+
 # Hunter's own verifier statuses, mapped down to the three this pipeline
 # ever acts on. "valid" is the only status Hunter itself is confident enough
 # in to call deliverable; everything else (accept_all, webmail, unknown,
@@ -58,7 +71,7 @@ class HunterProvider:
             people.append(PersonRef(
                 full_name=full_name,
                 title=entry.get("position") or "",
-                profile_url=entry.get("linkedin_url") or None,
+                profile_url=_safe_profile_url(entry.get("linkedin_url")),
                 email=value,
                 # Never "verified" here -- see class docstring.
                 email_status="unverified",
