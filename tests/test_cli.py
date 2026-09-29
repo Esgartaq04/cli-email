@@ -5,6 +5,44 @@ from outreach.cli import app
 
 runner = CliRunner()
 
+_TEST_CONFIG = """
+[gate]
+min_independent_sources = 2
+require_first_party = true
+recency_days = 180
+first_party_classes = ["job_posting", "careers_page", "eng_blog"]
+
+[ranking]
+max_contacts_per_company = 3
+exclude_title_patterns = ["recruit"]
+
+[discovery]
+headcount_min = 20
+headcount_max = 1000
+region = "US"
+greenhouse_tokens = []
+
+[paths]
+db = "data/pipeline.db"
+cache = "data/cache"
+reports = "reports"
+"""
+
+
+@pytest.fixture(autouse=True)
+def isolated_from_the_users_setup(monkeypatch, tmp_path):
+    """Never let a test see the user's real .env, config or data.
+
+    `build_context` calls `load_dotenv()`, which walks up from the package
+    directory and finds the repo's real .env, so a test that deletes API
+    keys from the environment gets them straight back and runs the live
+    pipeline with real credentials. The relative config and data paths are
+    pointed at a scratch directory for the same reason.
+    """
+    monkeypatch.setattr("outreach.cli.load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.toml").write_text(_TEST_CONFIG, encoding="utf-8")
+
 
 def test_missing_api_key_aborts_before_any_network_call(monkeypatch, tmp_path):
     """Fail fast: a broken run must cost zero credits."""

@@ -125,6 +125,20 @@
   .chip.err { border-color: transparent; background: var(--bad-soft); color: var(--bad); }
   .why-none { color: var(--muted); font-size: 13.5px; margin-top: 12px; }
 
+
+  .findings { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 14px; }
+  .findings h3 { font-size: 11.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--faint); margin: 0 0 10px; font-weight: 600; }
+  details.theme { border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; margin-bottom: 8px; }
+  details.theme summary { cursor: pointer; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+  .theme-name { font-weight: 600; }
+  .theme-facts { color: var(--muted); font-size: 12.5px; }
+  .theme-short { color: var(--warn); font-size: 12.5px; }
+  details.theme .ev { margin: 12px 0 4px; }
+  .pages { list-style: none; margin: 0; padding: 0; font-size: 12.5px; }
+  .pages li { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; padding: 3px 0; color: var(--muted); }
+  .pages .none { color: var(--faint); }
+  .pages a { color: var(--muted); word-break: break-all; }
+
   footer.diag {
     margin-top: 44px; padding-top: 18px; border-top: 1px solid var(--border);
     font-size: 13px; color: var(--muted);
@@ -176,6 +190,55 @@
       {% endif %}
     </div>
     {% endfor %}
+  </div>
+  {% endif %}
+{% endmacro %}
+
+{% macro findings_block(company) %}
+  {% if company.themes %}
+  <div class="findings">
+    <h3>What was found</h3>
+    {% for t in company.themes %}
+    <details class="theme">
+      <summary>
+        <span class="theme-name">{{ t.theme }}</span>
+        <span class="theme-facts">{{ t.evidence|length }} quote{{ '' if t.evidence|length == 1 else 's' }}
+          · {{ t.source_labels|join(', ') }}</span>
+        <span class="theme-short">{{ t.independent_sources }} of {{ view.min_independent_sources }}
+          independent sources — {{ reason_text.get(t.reason, t.reason) }}</span>
+      </summary>
+      {% for e in t.evidence %}
+      <div class="ev">
+        <blockquote>{{ e.quote }}</blockquote>
+        <div class="ev-meta">
+          <span class="badge">{{ e.source_class.replace('_', ' ') }}</span>
+          <span>{% if e.published_at %}
+                  {% if e.source_class in current_state_classes %}
+                    current as of {{ e.published_at.strftime('%d %b') }}
+                  {% else %}{{ e.published_at.strftime('%d %b %Y') }}{% endif %}
+                {% else %}undated{% endif %}</span>
+          <a href="{{ e.url }}">{{ e.url }}</a>
+        </div>
+      </div>
+      {% endfor %}
+    </details>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% if company.sources_read %}
+  <div class="findings">
+    <h3>Pages read</h3>
+    <ul class="pages">
+      {% for src in company.sources_read %}
+      <li>
+        <span class="badge">{{ src.source_class.replace('_', ' ') }}</span>
+        <span class="{% if not src.claims %}none{% endif %}">
+          {% if src.claims %}{{ src.claims }} claim{{ '' if src.claims == 1 else 's' }}{% else %}no claims{% endif %}</span>
+        <span>{% if src.published_at %}{{ src.published_at.strftime('%d %b %Y') }}{% else %}undated{% endif %}</span>
+        <a href="{{ src.url }}">{{ src.url }}</a>
+      </li>
+      {% endfor %}
+    </ul>
   </div>
   {% endif %}
 {% endmacro %}
@@ -243,6 +306,7 @@
     {{ reason_text.get(company.reason, company.reason) }}
     ({{ company.reason }}).</p>
   {% endif %}
+  {{ findings_block(company) }}
   {{ contacts_block(company) }}
 </article>
 {% endfor %}

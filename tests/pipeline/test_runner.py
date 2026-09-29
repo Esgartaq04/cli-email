@@ -243,9 +243,10 @@ def test_resuming_after_a_crash_does_not_duplicate_evidence():
     rows = ctx.evidence.for_company(run_id, good)
     assert len(rows) == 3  # not 5
     assert len({r.quote for r in rows}) == 3
-    # 4 real surfaces + 1 synthetic "skipped_no_github_org" record; not
-    # doubled to 10 by the interrupted partial attempt.
-    assert len(ctx.fetch_attempts.for_company(run_id, good)) == 5
+    # 4 real surfaces + 1 job-posting read (the fixture's posting URL is
+    # unfetchable) + 1 synthetic "skipped_no_github_org" record; not doubled
+    # by the interrupted partial attempt.
+    assert len(ctx.fetch_attempts.for_company(run_id, good)) == 6
     assert summary.quotes_accepted == 3
 
 

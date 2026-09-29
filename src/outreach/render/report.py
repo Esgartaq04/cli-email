@@ -17,6 +17,25 @@ class ReportEvidence:
 
 
 @dataclass
+class ReportSource:
+    """One page that was read, and how many claims survived from it."""
+    url: str
+    source_class: str
+    published_at: date | None
+    claims: int
+
+
+@dataclass
+class ReportTheme:
+    """Everything found under one theme, and how far it got through the gate."""
+    theme: str
+    evidence: list[ReportEvidence]
+    source_labels: list[str]
+    independent_sources: int
+    reason: str
+
+
+@dataclass
 class ReportContact:
     full_name: str
     title: str
@@ -40,6 +59,8 @@ class ReportCompany:
     fetch_log: list[tuple[str, str, int | None]] = field(default_factory=list)
     domain_confirmed: bool = True
     error: str | None = None
+    themes: list[ReportTheme] = field(default_factory=list)
+    sources_read: list[ReportSource] = field(default_factory=list)
 
 
 @dataclass
@@ -53,6 +74,7 @@ class ReportView:
     no_bottleneck: list[ReportCompany]
     diagnostics: dict[str, str]
     errors: list[str] = field(default_factory=list)
+    min_independent_sources: int = 2
 
 
 _env = Environment(

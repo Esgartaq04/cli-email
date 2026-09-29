@@ -12,7 +12,9 @@ exclude_title_patterns = ["recruit", "talent", "sourcer"]
 headcount_min = 20
 headcount_max = 1000
 region = "US"
-greenhouse_tokens = []
+greenhouse_tokens = ["stripe", "plaid", "brex"]
+max_blog_posts = 5      # engineering posts read per company (each fetch waits out the 2s per-host limit)
+max_job_postings = 2    # matching job postings read per company
 
 [paths]
 db = "data/pipeline.db"

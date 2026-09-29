@@ -12,8 +12,10 @@ from outreach.core.gate import GateVerdict, evaluate
 from outreach.core.ranking import rank_contacts
 from outreach.extraction.extract import extract_and_persist
 from outreach.extraction.htmltext import html_to_text
+from outreach.extraction.pubdate import parse_published_date
 from outreach.pipeline.context import RunContext
 from outreach.sources.base import SurfaceTarget
+from outreach.sources.surfaces.blog import find_blog_links
 from outreach.sources.surfaces.standard import surface_targets
 from outreach.types import (Bottleneck, EvidenceItem, FetchAttempt, PersonRef,
                             PostingRef, SourceClass, SourceDocument)
@@ -87,6 +89,7 @@ def run_pipeline(
     terms = ctx.llm.expand_titles(role_title)
     postings = ctx.job_board.search(terms, ctx.config.discovery.region)
     company_ids: list[int] = []
+    postings_by_company: dict[int, list[PostingRef]] = {}
     for domain, group in _group_by_domain(postings, summary).items():
         try:
             company_id = ctx.companies.upsert(domain, group[0].company_name, None, None)
@@ -96,6 +99,7 @@ def run_pipeline(
             continue
         ctx.runs.set_stage(run_id, company_id, "discover", "ok")
         company_ids.append(company_id)
+        postings_by_company[company_id] = group
     summary.companies = len(company_ids)
 
     # --- profile + evidence (per company, isolated) ---------------------
@@ -109,7 +113,8 @@ def run_pipeline(
             # doubles the rows and the report cites the same quote twice.
             ctx.evidence.clear_for_company(run_id, company_id)
             ctx.fetch_attempts.clear_for_company(run_id, company_id)
-            result = _profile_and_extract(ctx, run_id, company_id, summary)
+            result = _profile_and_extract(ctx, run_id, company_id, summary,
+                                          postings_by_company.get(company_id, ()))
             joined = "; ".join(result.errors)
             summary.errors.extend(f"evidence {company_id}: {e}" for e in result.errors)
             if result.completed or not result.errors:
@@ -145,7 +150,9 @@ def run_pipeline(
                      if ctx.runs.stage_status(run_id, c, "contacts") != "ok"]
     pending = []
     for company_id in still_pending:
-        confirmed = any(a.outcome == "ok"
+        # A job-posting page is usually hosted by the job board, not the
+        # company, so reaching one says nothing about the guessed domain.
+        confirmed = any(a.outcome == "ok" and a.source_class is not SourceClass.JOB_POSTING
                         for a in ctx.fetch_attempts.for_company(run_id, company_id))
         if confirmed:
             pending.append(company_id)
@@ -256,7 +263,8 @@ class _SurfaceSweep:
 
 
 def _profile_and_extract(ctx: RunContext, run_id: int, company_id: int,
-                         summary: RunSummary) -> _SurfaceSweep:
+                         summary: RunSummary,
+                         postings: Sequence[PostingRef] = ()) -> _SurfaceSweep:
     company = ctx.companies.get(company_id)
     completed = 0
     errors: list[str] = []
@@ -272,6 +280,14 @@ def _profile_and_extract(ctx: RunContext, run_id: int, company_id: int,
             errors.append(f"{target.source_class.value}: {exc}")
             continue
         completed += 1
+
+    try:
+        _sweep_postings(ctx, run_id, company_id, company.canonical_domain,
+                        postings, summary)
+    except Exception as exc:
+        # Postings are extra corroboration, not a surface: losing them must
+        # not count against the company or discard the surfaces already read.
+        errors.append(f"job_posting: {exc}")
 
     if github_org is None:
         # `surface_targets` silently leaves GitHub out of the list whenever
@@ -290,13 +306,32 @@ def _profile_and_extract(ctx: RunContext, run_id: int, company_id: int,
 
 def _sweep_surface(ctx: RunContext, run_id: int, company_id: int, domain: str,
                    target: SurfaceTarget, summary: RunSummary) -> None:
+    if target.source_class is SourceClass.ENG_BLOG:
+        _sweep_blog(ctx, run_id, company_id, domain, target, summary)
+        return
     outcome = ctx.fetcher.get(target.url)
     if outcome.outcome != "ok" or not outcome.body:
-        ctx.fetch_attempts.insert(run_id, FetchAttempt(
-            company_id, target.source_class, target.url,
-            outcome.outcome, outcome.status, 0))
+        _record_attempt(ctx, run_id, company_id, target.source_class, outcome, 0)
         return
+    _ingest(ctx, run_id, company_id, domain, target.source_class, outcome, summary)
 
+
+def _record_attempt(ctx: RunContext, run_id: int, company_id: int,
+                    source_class: SourceClass, outcome, documents: int) -> None:
+    ctx.fetch_attempts.insert(run_id, FetchAttempt(
+        company_id, source_class, outcome.url, outcome.outcome, outcome.status,
+        documents))
+
+
+def _ingest(ctx: RunContext, run_id: int, company_id: int, domain: str,
+            source_class: SourceClass, outcome, summary: RunSummary,
+            page_dated: bool = False) -> None:
+    """Store one fetched page and extract its claims.
+
+    `page_dated` reads the publication date out of the page's own markup,
+    for individual posts; without it the date is the fetch date for
+    current-state surfaces and None for everything else.
+    """
     # Both the LLM and the substring guard must see the SAME text, or an
     # honest quote that merely crosses an inline tag (or carries an entity
     # like &rsquo;) is rejected, while a quote that literally preserves
@@ -305,20 +340,94 @@ def _sweep_surface(ctx: RunContext, run_id: int, company_id: int, domain: str,
     # extract plain prose from it before either side ever looks at it.
     text = html_to_text(outcome.body)
     content_hash = ctx.cache.store(text.encode("utf-8"))
-    published_at = (
-        ctx.today if target.source_class in CURRENT_STATE_CLASSES else None
-    )
-    doc = SourceDocument(None, company_id, target.url, target.source_class,
+    if page_dated:
+        published_at = parse_published_date(outcome.body)
+    else:
+        published_at = ctx.today if source_class in CURRENT_STATE_CLASSES else None
+    doc = SourceDocument(None, company_id, outcome.url, source_class,
                          domain, published_at, datetime.now(),
                          outcome.status or 200, content_hash)
     doc_id = ctx.documents.insert(doc)
-    ctx.fetch_attempts.insert(run_id, FetchAttempt(
-        company_id, target.source_class, target.url, "ok", outcome.status, 1))
+    _record_attempt(ctx, run_id, company_id, source_class, outcome, 1)
 
     result = extract_and_persist(run_id, doc, text, ctx.llm,
                                  ctx.evidence, document_id=doc_id)
     summary.quotes_accepted += result.accepted
     summary.quotes_rejected += result.rejected
+
+
+def _sweep_blog(ctx: RunContext, run_id: int, company_id: int, domain: str,
+                target: SurfaceTarget, summary: RunSummary) -> None:
+    """Read individual engineering posts, not the blog's front page.
+
+    A blog index is a wall of teasers with no dates, and mixes marketing in
+    with engineering writing. The posts carry the substance and their own
+    publication dates, and most blogs have an engineering section that
+    holds the ones worth reading. If no post links can be found the index
+    itself is read, as before, so a blog with unusual markup is not lost.
+    """
+    cls = target.source_class
+    index = ctx.fetcher.get(target.url)
+    if index.outcome != "ok" or not index.body:
+        _record_attempt(ctx, run_id, company_id, cls, index, 0)
+        return
+
+    links = find_blog_links(index.body, target.url)
+    candidates = links.posts
+    discovery = [index]
+    if links.engineering_index:
+        eng = ctx.fetcher.get(links.engineering_index)
+        discovery.append(eng)
+        if eng.outcome == "ok" and eng.body:
+            eng_posts = find_blog_links(eng.body, links.engineering_index).posts
+            if eng_posts:
+                candidates = eng_posts
+
+    if not candidates:
+        for page in discovery[1:]:
+            _record_attempt(ctx, run_id, company_id, cls, page, 0)
+        _ingest(ctx, run_id, company_id, domain, cls, index, summary)
+        return
+
+    for page in discovery:
+        _record_attempt(ctx, run_id, company_id, cls, page, 0)
+
+    # Listed posts can 404 (unpublished cards, moved URLs), so keep going past
+    # failures, but never spend more than twice the budget doing it.
+    wanted = ctx.config.discovery.max_blog_posts
+    read = tried = 0
+    for url in candidates:
+        if read >= wanted or tried >= 2 * wanted:
+            break
+        tried += 1
+        post = ctx.fetcher.get(url)
+        if post.outcome == "ok" and post.body:
+            _ingest(ctx, run_id, company_id, domain, cls, post, summary, page_dated=True)
+            read += 1
+        else:
+            _record_attempt(ctx, run_id, company_id, cls, post, 0)
+
+
+def _sweep_postings(ctx: RunContext, run_id: int, company_id: int, domain: str,
+                    postings: Sequence[PostingRef], summary: RunSummary) -> None:
+    """Read the postings this company was discovered through.
+
+    A posting for the very role being researched is first-party, current
+    evidence, and a different source class from a blog post -- which is what
+    lets a bottleneck be corroborated at all.
+    """
+    seen: set[str] = set()
+    for posting in postings:
+        if len(seen) >= ctx.config.discovery.max_job_postings:
+            break
+        if posting.url in seen:
+            continue
+        seen.add(posting.url)
+        outcome = ctx.fetcher.get(posting.url)
+        if outcome.outcome != "ok" or not outcome.body:
+            _record_attempt(ctx, run_id, company_id, SourceClass.JOB_POSTING, outcome, 0)
+            continue
+        _ingest(ctx, run_id, company_id, domain, SourceClass.JOB_POSTING, outcome, summary)
 
 
 def _resolve_contacts(ctx: RunContext, company_id: int, role_title: str) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections import Counter
 from datetime import date
 from pathlib import Path
 
@@ -9,17 +10,19 @@ import typer
 from dotenv import load_dotenv
 
 from outreach.config import Config, ConfigError, load_config, require_env
+from outreach.core.clustering import cluster_by_theme
+from outreach.core.gate import evaluate
 from outreach.core.ranking import rank_contacts
 from outreach.net.fetcher import Fetcher, build_user_agent
 from outreach.pipeline.context import RunContext
 from outreach.pipeline.runner import RunSummary, run_pipeline
 from outreach.render.report import (ReportCompany, ReportContact, ReportEvidence,
-                                    ReportView, write_report)
+                                    ReportSource, ReportTheme, ReportView, write_report)
 from outreach.store.cache import DocumentCache
 from outreach.store.db import connect
 from outreach.store.dimensions import CompanyRepo, ContactRepo, DocumentRepo
 from outreach.store.runs import BottleneckRepo, EvidenceRepo, FetchAttemptRepo, RunRepo
-from outreach.types import Company, Contact, PersonRef
+from outreach.types import Company, Contact, PersonRef, SourceDocument
 
 app = typer.Typer(help="Outreach research pipeline")
 
@@ -95,6 +98,46 @@ def _rank_and_cap_contacts(
     return contacts
 
 
+def _findings(ctx: RunContext, run_id: int, company_id: int
+              ) -> tuple[list[ReportTheme], list[ReportSource]]:
+    """What a run found for a company, laid out for a reader asking "why not?".
+
+    Themes come with their own gate verdict because the gate is evaluated
+    per theme: a company can hold thirteen quotes and still have no theme
+    with two independent sources, and the reader needs to see that.
+    """
+    items = ctx.evidence.for_company(run_id, company_id)
+    docs = ctx.documents.for_company(company_id)
+    urls = {d.id: d.url for d in docs}
+
+    read_urls = {a.url for a in ctx.fetch_attempts.for_company(run_id, company_id)
+                 if a.outcome == "ok" and a.document_count}
+    latest: dict[str, SourceDocument] = {}
+    for d in docs:
+        if d.url in read_urls and (d.url not in latest or d.id > latest[d.url].id):
+            latest[d.url] = d
+    claims_per_doc = Counter(i.source_document_id for i in items)
+    sources = [ReportSource(d.url, d.source_class.value, d.published_at,
+                            claims_per_doc.get(d.id, 0))
+               for d in sorted(latest.values(), key=lambda d: d.id)]
+
+    themes: list[ReportTheme] = []
+    for theme, cluster in cluster_by_theme(items).items():
+        verdict = evaluate(cluster, ctx.config.gate, ctx.today)
+        themes.append(ReportTheme(
+            theme=theme,
+            evidence=[ReportEvidence(i.quote, i.source_class.value,
+                                     urls.get(i.source_document_id, ""), i.published_at)
+                      for i in cluster],
+            source_labels=sorted({i.source_class.value.replace("_", " ") for i in cluster}),
+            independent_sources=len({(i.source_class.value, i.publisher_domain)
+                                     for i in cluster}),
+            reason=verdict.reason,
+        ))
+    themes.sort(key=lambda t: (-t.independent_sources, -len(t.evidence), t.theme))
+    return themes, sources
+
+
 def build_view(ctx: RunContext, summary: RunSummary, fresh: bool = True) -> ReportView:
     """Assemble the report view model from persisted rows.
 
@@ -139,6 +182,8 @@ def build_view(ctx: RunContext, summary: RunSummary, fresh: bool = True) -> Repo
             fetch_log=fetch_log,
             domain_confirmed=contacts_stage != "skipped_domain_unconfirmed",
         )
+        if not bottleneck.passed:
+            card.themes, card.sources_read = _findings(ctx, run_id, bottleneck.company_id)
         (evidenced if bottleneck.passed else no_bottleneck).append(card)
         handled_company_ids.add(bottleneck.company_id)
 
@@ -159,11 +204,13 @@ def build_view(ctx: RunContext, summary: RunSummary, fresh: bool = True) -> Repo
         ]
         error = (ctx.runs.stage_error(run_id, company_id, "evidence")
                  or ctx.runs.stage_error(run_id, company_id, "discover"))
+        themes, sources_read = _findings(ctx, run_id, company_id)
         no_bottleneck.append(ReportCompany(
             name=company.name, domain=company.canonical_domain,
             headcount=company.headcount, headcount_source=company.headcount_source,
             claim="", summary="", reason="research_failed",
             evidence=[], contacts=[], fetch_log=fetch_log, error=error,
+            themes=themes, sources_read=sources_read,
         ))
 
     # Smallest and most bypassable first; unknown headcount sorts last.
@@ -176,6 +223,7 @@ def build_view(ctx: RunContext, summary: RunSummary, fresh: bool = True) -> Repo
         headcount_min=ctx.config.discovery.headcount_min,
         headcount_max=ctx.config.discovery.headcount_max,
         evidenced=evidenced, no_bottleneck=no_bottleneck,
+        min_independent_sources=ctx.config.gate.min_independent_sources,
         # Errors aren't persisted past the run that produced them either --
         # same "not recorded" honesty as the diagnostics values below.
         errors=summary.errors if fresh else ["not recorded"],

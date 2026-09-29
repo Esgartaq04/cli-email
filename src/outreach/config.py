@@ -30,6 +30,8 @@ class DiscoveryConfig:
     headcount_max: int
     region: str
     greenhouse_tokens: tuple[str, ...]
+    max_blog_posts: int = 5
+    max_job_postings: int = 2
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,8 @@ def load_config(path: Path) -> Config:
                 headcount_max=int(d["headcount_max"]),
                 region=str(d["region"]),
                 greenhouse_tokens=tuple(d["greenhouse_tokens"]),
+                max_blog_posts=int(d.get("max_blog_posts", 5)),
+                max_job_postings=int(d.get("max_job_postings", 2)),
             ),
             paths=PathsConfig(
                 db=Path(p["db"]), cache=Path(p["cache"]), reports=Path(p["reports"])

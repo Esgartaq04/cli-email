@@ -6,11 +6,12 @@ from typing import Sequence
 
 import httpx
 
+from outreach.core.clustering import normalize_theme
 from outreach.llm.base import RawClaim
 
 _API_URL = "https://api.anthropic.com/v1/messages"
 _API_VERSION = "2023-06-01"
-_MODEL = "claude-3-5-sonnet-20241022"
+_MODEL = "claude-sonnet-5"
 
 _EXPAND_SYSTEM = (
     "You expand a single job title into a short list of closely related job "
@@ -19,14 +20,44 @@ _EXPAND_SYSTEM = (
     "No prose, no markdown fences, no commentary."
 )
 
+# A closed list, because clustering is exact-match on the theme: a slug the
+# model invents per page ("manual-toil" here, "toil-reduction" there) never
+# collides across sources, so nothing could ever be corroborated. There is
+# deliberately no catch-all: two unrelated "other" claims would cluster and
+# could pass the gate together.
+THEMES: tuple[str, ...] = (
+    "scaling-bottlenecks",
+    "reliability",
+    "manual-toil",
+    "migration-debt",
+    "tooling-friction",
+    "data-infrastructure",
+    "cost-pressure",
+)
+
+_THEME_HELP = (
+    "scaling-bottlenecks (systems straining under growth in load or data), "
+    "reliability (outages, incidents, on-call burden), "
+    "manual-toil (repetitive hand-run operational work), "
+    "migration-debt (legacy systems, migrations, upgrades, refactors), "
+    "tooling-friction (slow builds, CI, tests, developer experience), "
+    "data-infrastructure (pipelines, databases, consistency and correctness), "
+    "cost-pressure (infrastructure or compute spend)"
+)
+
 _EXTRACT_SYSTEM = (
-    "You extract factual claims about engineering-team pain points (scaling "
-    "bottlenecks, manual toil, operational strain) from the given page text. "
+    "You extract factual claims about a company's OWN engineering pain points "
+    "from the given page text. Only claims about the company's own systems, "
+    "teams or operations qualify: skip marketing copy, product benefits, "
+    "customer stories, perks and benefits, and generic job responsibilities. "
+    "For a job posting, keep only statements describing the team's technical "
+    "challenges or scale problems. "
     "Every quote you return MUST be copied verbatim, character-for-character, "
     "from the supplied text -- never paraphrased or invented. Respond with "
     "strict JSON only: a JSON array of objects, each with exactly the keys "
-    '"claim" (a short paraphrase), "quote" (the verbatim excerpt), and "theme" '
-    "(a short slug grouping related claims). Return an empty array if there is "
+    '"claim" (a short paraphrase), "quote" (the verbatim excerpt), and "theme". '
+    "The theme MUST be exactly one of these slugs: " + _THEME_HELP + ". If a "
+    "claim fits none of them, leave it out. Return an empty array if there is "
     "nothing relevant. No prose, no markdown fences, no commentary."
 )
 
@@ -128,6 +159,9 @@ class AnthropicLLM:
             theme = item.get("theme")
             if not (isinstance(claim, str) and isinstance(quote, str)
                     and isinstance(theme, str)):
+                continue
+            theme = normalize_theme(theme)
+            if theme not in THEMES:
                 continue
             claims.append(RawClaim(claim=claim, quote=quote, theme=theme))
         return claims
