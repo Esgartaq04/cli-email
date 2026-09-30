@@ -7,6 +7,7 @@ from typing import Sequence
 import httpx
 
 from outreach.core.clustering import normalize_theme
+from outreach.core.themes import ALL_THEMES
 from outreach.llm.base import RawClaim
 
 _API_URL = "https://api.anthropic.com/v1/messages"
@@ -20,38 +21,38 @@ _EXPAND_SYSTEM = (
     "No prose, no markdown fences, no commentary."
 )
 
-# A closed list, because clustering is exact-match on the theme: a slug the
-# model invents per page ("manual-toil" here, "toil-reduction" there) never
-# collides across sources, so nothing could ever be corroborated. There is
+# The theme list itself lives in core/themes.py (it is closed, because
+# clustering is exact-match on the theme: a slug the model invents per page
+# never collides across sources, so nothing could be corroborated). There is
 # deliberately no catch-all: two unrelated "other" claims would cluster and
-# could pass the gate together.
-THEMES: tuple[str, ...] = (
-    "scaling-bottlenecks",
-    "reliability",
-    "manual-toil",
-    "migration-debt",
-    "tooling-friction",
-    "data-infrastructure",
-    "cost-pressure",
-)
+# could pass the gate together. Only the prompt wording for each slug lives here.
+_THEME_DESCRIPTIONS = {
+    "product-launch": "shipped or launched a product/feature",
+    "active-build": "currently building or about to build",
+    "platform-infra": "internal platform or infrastructure work",
+    "ai-ml": "AI/ML features or models",
+    "public-api-sdk": "public API, SDK, integrations",
+    "open-source": "open-source projects",
+    "new-market": "entering a new market, segment or region",
+    "funding-round": "a named funding round, IPO or acquisition of the company",
+    "new-office": "opening an office or hub",
+    "acquisition": "the company acquiring another company",
+    "headcount-statement": "a stated team or employee count",
+    "new-product-line": "launching a distinct new product line",
+}
 
-_THEME_HELP = (
-    "scaling-bottlenecks (systems straining under growth in load or data), "
-    "reliability (outages, incidents, on-call burden), "
-    "manual-toil (repetitive hand-run operational work), "
-    "migration-debt (legacy systems, migrations, upgrades, refactors), "
-    "tooling-friction (slow builds, CI, tests, developer experience), "
-    "data-infrastructure (pipelines, databases, consistency and correctness), "
-    "cost-pressure (infrastructure or compute spend)"
-)
+# Driven by ALL_THEMES so the prompt can never list a slug the parser rejects
+# (or omit one it accepts); a slug without a description fails at import.
+_THEME_HELP = ", ".join(
+    f"{slug} ({_THEME_DESCRIPTIONS[slug]})" for slug in ALL_THEMES)
 
 _EXTRACT_SYSTEM = (
-    "You extract factual claims about a company's OWN engineering pain points "
-    "from the given page text. Only claims about the company's own systems, "
-    "teams or operations qualify: skip marketing copy, product benefits, "
-    "customer stories, perks and benefits, and generic job responsibilities. "
-    "For a job posting, keep only statements describing the team's technical "
-    "challenges or scale problems. "
+    "You extract factual claims about what a company is building, shipping or "
+    "working on, and about its growth stage, from the given page text. Only "
+    "claims about the company itself qualify: skip customer testimonials, "
+    "perks and benefits, and generic job responsibilities. For a job posting, "
+    "keep only statements describing what the team is building or the "
+    "initiative the hire joins. "
     "Every quote you return MUST be copied verbatim, character-for-character, "
     "from the supplied text -- never paraphrased or invented. Respond with "
     "strict JSON only: a JSON array of objects, each with exactly the keys "
@@ -62,10 +63,10 @@ _EXTRACT_SYSTEM = (
 )
 
 _SUMMARY_SYSTEM = (
-    "You write a two-to-three sentence, neutral, factual summary of a "
-    "corroborated engineering bottleneck, grounded only in the claim and "
-    "quotes given to you. Respond with strict JSON only: a JSON object with "
-    'exactly the key "summary" holding the summary text. No prose, no '
+    "You write a two-to-three sentence, neutral, factual summary of what a "
+    "company is building and where it is heading, grounded only in the claim "
+    "and quotes given to you. Respond with strict JSON only: a JSON object "
+    'with exactly the key "summary" holding the summary text. No prose, no '
     "markdown fences, no commentary."
 )
 
@@ -161,7 +162,7 @@ class AnthropicLLM:
                     and isinstance(theme, str)):
                 continue
             theme = normalize_theme(theme)
-            if theme not in THEMES:
+            if theme not in ALL_THEMES:
                 continue
             claims.append(RawClaim(claim=claim, quote=quote, theme=theme))
         return claims
