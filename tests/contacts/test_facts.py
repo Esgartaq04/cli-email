@@ -10,6 +10,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from outreach.contacts.hunter import HunterAPIError
 from outreach.contacts.facts import FakeFactsProvider, HunterFactsProvider, parse_band
 from outreach.types import CompanyFacts, FundingRound
 
@@ -71,7 +72,7 @@ def test_unknown_company_is_none_not_an_error():
 
 def test_other_http_errors_propagate():
     provider = _provider(lambda request: httpx.Response(429))
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(HunterAPIError, match="companies/find returned HTTP 429"):
         provider.company_facts("acme.com")
 
 

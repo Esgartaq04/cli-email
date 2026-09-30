@@ -5,7 +5,7 @@ from typing import Protocol
 
 import httpx
 
-from outreach.contacts.hunter import _BASE_URL
+from outreach.contacts.hunter import hunter_get
 from outreach.core.stage import parse_band, parse_round
 from outreach.types import CompanyFacts, FundingRound
 
@@ -77,15 +77,12 @@ class HunterFactsProvider:
         self._client = client or httpx.Client(timeout=30.0)
 
     def company_facts(self, domain: str) -> CompanyFacts | None:
-        response = self._client.get(
-            f"{_BASE_URL}/companies/find",
-            params={"domain": domain, "api_key": self._api_key})
-        # An unknown company is an answer, not a failure.
-        if response.status_code == 404:
+        # An unknown company is an answer, not a failure (404 -> None).
+        payload = hunter_get(self._client, "companies/find", self._api_key,
+                             missing_ok=True, domain=domain)
+        if payload is None:
             return None
-        response.raise_for_status()
-        payload = response.json()
-        data = payload.get("data") if isinstance(payload, dict) else None
+        data = payload.get("data")
         if not isinstance(data, dict):
             data = {}
 
