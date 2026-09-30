@@ -1,11 +1,20 @@
 # src/outreach/store/dimensions.py
 from __future__ import annotations
 
+import json
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime
 
 from outreach.core.dedupe import canonical_domain
-from outreach.types import Company, Contact, PersonRef, SourceClass, SourceDocument
+from outreach.types import (
+    Company,
+    CompanyFacts,
+    Contact,
+    FundingRound,
+    PersonRef,
+    SourceClass,
+    SourceDocument,
+)
 
 
 def _dt(value: str | None) -> datetime | None:
@@ -44,8 +53,47 @@ class CompanyRepo:
         row = self.conn.execute(
             "SELECT * FROM companies WHERE id = ?", (company_id,)
         ).fetchone()
+        rounds = tuple(
+            FundingRound(r["kind"], date.fromisoformat(r["announced"]) if r["announced"] else None)
+            for r in json.loads(row["funding_rounds"] or "[]"))
         return Company(row["id"], row["canonical_domain"], row["name"],
-                       row["headcount"], row["headcount_source"])
+                       row["headcount"], row["headcount_source"],
+                       row["headcount_band"], row["founded_year"], rounds,
+                       tuple(json.loads(row["tags"] or "[]")), row["github_org"],
+                       _dt(row["facts_fetched_at"]))
+
+    def set_facts(self, company_id: int, facts: CompanyFacts, fetched_at: datetime) -> None:
+        # A facts record with no headcount must not erase one we already know
+        # (e.g. from a careers page), same as `upsert`'s COALESCE -- and the
+        # source label travels with the number it describes.
+        self.conn.execute(
+            """UPDATE companies SET
+                 headcount = COALESCE(?, headcount),
+                 headcount_source = CASE WHEN ? IS NULL THEN headcount_source ELSE ? END,
+                 headcount_band = ?, founded_year = ?, funding_rounds = ?, tags = ?,
+                 facts_source = ?, facts_fetched_at = ?
+               WHERE id = ?""",
+            (facts.headcount, facts.headcount, facts.source, facts.headcount_band,
+             facts.founded_year,
+             json.dumps([{"kind": r.kind,
+                          "announced": r.announced.isoformat() if r.announced else None}
+                         for r in facts.funding_rounds]),
+             json.dumps(list(facts.tags)), facts.source, fetched_at.isoformat(), company_id),
+        )
+        self.conn.commit()
+
+    def mark_facts_checked(self, company_id: int, fetched_at: datetime) -> None:
+        """Stamp the fetch time only: Hunter was asked and had nothing, and the
+        stamp is what stops the next run re-spending a credit on the same miss
+        inside the facts TTL."""
+        self.conn.execute("UPDATE companies SET facts_fetched_at = ? WHERE id = ?",
+                          (fetched_at.isoformat(), company_id))
+        self.conn.commit()
+
+    def set_github_org(self, company_id: int, org: str | None) -> None:
+        self.conn.execute("UPDATE companies SET github_org = ? WHERE id = ?",
+                          (org, company_id))
+        self.conn.commit()
 
 
 class ContactRepo:

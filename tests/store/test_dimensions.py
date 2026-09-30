@@ -1,8 +1,8 @@
 # tests/store/test_dimensions.py
-from datetime import datetime
+from datetime import date, datetime
 from outreach.store.db import connect
 from outreach.store.dimensions import CompanyRepo, ContactRepo, DocumentRepo
-from outreach.types import PersonRef, SourceClass, SourceDocument
+from outreach.types import CompanyFacts, FundingRound, PersonRef, SourceClass, SourceDocument
 
 
 def repos(tmp_path):
@@ -106,3 +106,52 @@ def test_document_insert_dedupes_and_returns_original_id(tmp_path):
     # a different row was inserted more recently on this connection.
     assert docs.insert(doc_a) == id_a
     assert len(docs.for_company(cid)) == 2
+
+
+def test_facts_round_trip(tmp_path):
+    companies, _ = repos(tmp_path)
+    cid = companies.upsert("a.example", "A", None, None)
+    fetched = datetime(2026, 9, 30)
+    companies.set_facts(
+        cid,
+        CompanyFacts(342, "201-500", 2019,
+                     (FundingRound("series_b", date(2026, 3, 4)), FundingRound("seed", None)),
+                     ("fintech",), "hunter"),
+        fetched)
+    c = companies.get(cid)
+    assert (c.headcount, c.headcount_source, c.headcount_band, c.founded_year) == (
+        342, "hunter", "201-500", 2019)
+    assert c.funding_rounds == (FundingRound("series_b", date(2026, 3, 4)),
+                                FundingRound("seed", None))
+    assert c.tags == ("fintech",)
+    assert c.facts_fetched_at == fetched
+    assert companies.conn.execute(
+        "SELECT facts_source FROM companies WHERE id = ?", (cid,)).fetchone()[0] == "hunter"
+
+
+def test_set_facts_with_no_headcount_keeps_the_known_one(tmp_path):
+    companies, _ = repos(tmp_path)
+    cid = companies.upsert("a.example", "A", 48, "careers page")
+    companies.set_facts(cid, CompanyFacts(None, None, 2020, (), (), "hunter"),
+                        datetime(2026, 9, 30))
+    c = companies.get(cid)
+    assert (c.headcount, c.headcount_source, c.founded_year) == (48, "careers page", 2020)
+
+
+def test_mark_facts_checked_stamps_only_the_fetch_time(tmp_path):
+    companies, _ = repos(tmp_path)
+    cid = companies.upsert("a.example", "A", 48, "careers page")
+    companies.mark_facts_checked(cid, datetime(2026, 9, 30))
+    c = companies.get(cid)
+    assert c.facts_fetched_at == datetime(2026, 9, 30)
+    assert (c.headcount, c.founded_year, c.funding_rounds, c.tags) == (48, None, (), ())
+
+
+def test_github_org_set_and_cleared(tmp_path):
+    companies, _ = repos(tmp_path)
+    cid = companies.upsert("a.example", "A", None, None)
+    assert companies.get(cid).github_org is None
+    companies.set_github_org(cid, "acme")
+    assert companies.get(cid).github_org == "acme"
+    companies.set_github_org(cid, None)
+    assert companies.get(cid).github_org is None

@@ -1,10 +1,20 @@
 # src/outreach/store/runs.py
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime
 
-from outreach.types import Bottleneck, EvidenceItem, FetchAttempt, SourceClass
+from outreach.types import (
+    Bottleneck,
+    EvidenceItem,
+    FetchAttempt,
+    Finding,
+    PostingRef,
+    SourceClass,
+    Stage,
+    StageResult,
+)
 
 
 class RunRepo:
@@ -15,12 +25,38 @@ class RunRepo:
                band: tuple[int, int], started_at: datetime) -> int:
         cur = self.conn.execute(
             """INSERT INTO runs (role_title, sector, region, headcount_min,
-                                 headcount_max, started_at, status)
-               VALUES (?, ?, ?, ?, ?, ?, 'running')""",
+                                 headcount_max, started_at, status, schema_version)
+               VALUES (?, ?, ?, ?, ?, ?, 'running', 2)""",
             (role_title, sector, region, band[0], band[1], started_at.isoformat()),
         )
         self.conn.commit()
         return int(cur.lastrowid)
+
+    def schema_version(self, run_id: int) -> int:
+        """1 for a run recorded before findings existed (its report reads
+        `bottlenecks`), 2 for every run created since."""
+        row = self.conn.execute(
+            "SELECT schema_version FROM runs WHERE id = ?", (run_id,)).fetchone()
+        return int(row["schema_version"])
+
+    def set_company_stage(self, run_id: int, company_id: int, result: StageResult) -> None:
+        # Not `set_stage`: that one records the pipeline step in run_companies.
+        self.conn.execute(
+            """INSERT INTO run_company_stages (run_id, company_id, stage, reasons)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(run_id, company_id) DO UPDATE SET
+                 stage = excluded.stage, reasons = excluded.reasons""",
+            (run_id, company_id, result.stage.value, json.dumps(list(result.reasons))),
+        )
+        self.conn.commit()
+
+    def company_stage(self, run_id: int, company_id: int) -> StageResult | None:
+        row = self.conn.execute(
+            "SELECT stage, reasons FROM run_company_stages WHERE run_id = ? AND company_id = ?",
+            (run_id, company_id)).fetchone()
+        if row is None:
+            return None
+        return StageResult(Stage(row["stage"]), tuple(json.loads(row["reasons"])))
 
     def finish(self, run_id: int, when: datetime) -> None:
         self.conn.execute("UPDATE runs SET finished_at = ?, status = 'done' WHERE id = ?",
@@ -150,6 +186,83 @@ class BottleneckRepo:
                 tuple(int(x) for x in r["evidence_ids"].split(",") if x),
             ) for r in rows
         ]
+
+
+class PostingRepo:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def insert(self, run_id: int, company_id: int, posting: PostingRef) -> None:
+        # company_name/company_domain are not stored: they are the company's,
+        # and `for_company` joins them back so they cannot drift.
+        self.conn.execute(
+            """INSERT OR IGNORE INTO run_postings (run_id, company_id, title, url,
+                                                   location, work_mode, employment_type)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (run_id, company_id, posting.title, posting.url, posting.location,
+             posting.work_mode, posting.employment_type),
+        )
+        self.conn.commit()
+
+    def for_company(self, run_id: int, company_id: int) -> list[PostingRef]:
+        rows = self.conn.execute(
+            """SELECT p.*, c.name AS company_name, c.canonical_domain AS company_domain
+               FROM run_postings p JOIN companies c ON c.id = p.company_id
+               WHERE p.run_id = ? AND p.company_id = ? ORDER BY p.id""",
+            (run_id, company_id)).fetchall()
+        return [
+            PostingRef(r["company_name"], r["company_domain"], r["title"], r["url"],
+                       r["location"], r["work_mode"], r["employment_type"])
+            for r in rows
+        ]
+
+
+class FindingRepo:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def insert(self, run_id: int, f: Finding) -> int:
+        cur = self.conn.execute(
+            """INSERT INTO findings (run_id, company_id, theme, claim, summary,
+                                     corroborated, passed, reason, evidence_ids)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (run_id, f.company_id, f.theme, f.claim, f.summary, int(f.corroborated),
+             int(f.passed), f.reason, ",".join(str(i) for i in f.evidence_ids)),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    @staticmethod
+    def _row_to_finding(r: sqlite3.Row) -> Finding:
+        return Finding(
+            r["id"], r["company_id"], r["theme"], r["claim"], r["summary"],
+            bool(r["corroborated"]), bool(r["passed"]), r["reason"],
+            tuple(int(x) for x in r["evidence_ids"].split(",") if x),
+        )
+
+    def for_company(self, run_id: int, company_id: int) -> list[Finding]:
+        rows = self.conn.execute(
+            "SELECT * FROM findings WHERE run_id = ? AND company_id = ? ORDER BY id",
+            (run_id, company_id)).fetchall()
+        return [self._row_to_finding(r) for r in rows]
+
+    def for_run(self, run_id: int) -> list[Finding]:
+        rows = self.conn.execute(
+            "SELECT * FROM findings WHERE run_id = ? ORDER BY id", (run_id,)).fetchall()
+        return [self._row_to_finding(r) for r in rows]
+
+    def clear_for_company(self, run_id: int, company_id: int) -> int:
+        """Drop this run's findings for one company; return the rows removed.
+
+        Same reason as `EvidenceRepo.clear_for_company`: `findings` has no
+        unique key, so re-running a company's synthesis after a partial
+        failure would otherwise stack a second copy of every finding.
+        """
+        cur = self.conn.execute(
+            "DELETE FROM findings WHERE run_id = ? AND company_id = ?",
+            (run_id, company_id))
+        self.conn.commit()
+        return int(cur.rowcount)
 
 
 class FetchAttemptRepo:
