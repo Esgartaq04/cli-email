@@ -469,8 +469,9 @@ def _sweep_surface(ctx: RunContext, run_id: int, company_id: int, domain: str,
                     limit=discovery.max_blog_posts)
     elif cls is SourceClass.PRESS:
         # A press page is a blog in all but name: an index of dated posts.
+        # Only its own section is followed -- see `find_blog_links`.
         _sweep_blog(ctx, run_id, company_id, domain, cls, page, summary,
-                    limit=discovery.max_press_posts)
+                    limit=discovery.max_press_posts, own_section_only=True)
     elif cls is SourceClass.CHANGELOG:
         _sweep_changelog(ctx, run_id, company_id, domain, page, summary)
     elif cls is SourceClass.DEV_DOCS:
@@ -599,7 +600,7 @@ def _sweep_github(ctx: RunContext, run_id: int, company_id: int, domain: str,
 
 def _sweep_blog(ctx: RunContext, run_id: int, company_id: int, domain: str,
                 cls: SourceClass, index: FetchOutcome, summary: RunSummary,
-                limit: int) -> None:
+                limit: int, own_section_only: bool = False) -> None:
     """Read individual posts, not the index's front page.
 
     A blog index is a wall of teasers with no dates, and mixes marketing in
@@ -607,12 +608,14 @@ def _sweep_blog(ctx: RunContext, run_id: int, company_id: int, domain: str,
     publication dates, and most blogs have an engineering section that
     holds the ones worth reading. If no post links can be found the index
     itself is read, as before, so a blog with unusual markup is not lost.
-    Press pages are read the same way, at most `limit` posts either way.
+    Press pages are read the same way, at most `limit` posts either way, but
+    with `own_section_only`: a press index that links the eng blog must not
+    re-read its posts as press.
 
     `index` is the page that answered, which may be an alternate: post
     links are resolved against it, so /news finds its /news/... posts.
     """
-    links = find_blog_links(index.body or "", index.url)
+    links = find_blog_links(index.body or "", index.url, own_section_only=own_section_only)
     candidates = links.posts
     discovery = [index]
     if links.engineering_index:

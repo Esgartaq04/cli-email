@@ -263,3 +263,23 @@ def test_the_status_page_is_no_longer_fetched():
     for cid in (company_id(ctx, "good.example"), company_id(ctx, "thin.example")):
         assert not any(a.url.startswith("https://status.")
                        for a in ctx.fetch_attempts.for_company(s.run_id, cid))
+
+
+def test_press_never_reads_blog_posts_its_index_links_to():
+    """One post read as ENG_BLOG and again as PRESS would pose as two
+    independent sources for the same claim."""
+    ctx = build_context()
+    real = ctx.fetcher.get
+
+    def get(url):
+        if url == "https://good.example/news":
+            return FetchOutcome(url, 200, '<html><body><a href="/blog/engineering">Eng</a>'
+                                '<a href="/blog/x">A post</a>'
+                                '<a href="/news/seed-round">Seed</a></body></html>', "ok")
+        return real(url)
+
+    ctx.fetcher.get = get
+    s = run_pipeline(ctx, "Backend Engineer", "fintech")
+    assert [d.url for d in _good(ctx, SourceClass.PRESS)] == [
+        "https://good.example/news/seed-round"]
+    assert not any("/blog/" in a.url for a in _good_attempts(ctx, s.run_id, SourceClass.PRESS))

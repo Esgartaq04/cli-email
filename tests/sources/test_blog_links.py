@@ -73,3 +73,11 @@ def test_no_links_at_all():
     links = find_blog_links("<html><body>nothing</body></html>", "https://acme.example/blog")
     assert links.posts == []
     assert links.engineering_index is None
+
+
+def test_own_section_only_follows_nothing_outside_the_index_section():
+    """A press index's nav can link the eng blog; those posts are not press."""
+    html = _page("/blog/engineering", "/blog/x", "/journal/y", "/news/seed-round")
+    links = find_blog_links(html, "https://acme.example/news", own_section_only=True)
+    assert links.engineering_index is None
+    assert links.posts == ["https://acme.example/news/seed-round"]

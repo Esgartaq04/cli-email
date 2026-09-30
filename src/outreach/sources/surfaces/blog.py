@@ -43,17 +43,22 @@ def _site(host: str) -> str:
     return host.lower().removeprefix("www.")
 
 
-def find_blog_links(html: str, base_url: str) -> BlogLinks:
+def find_blog_links(html: str, base_url: str, own_section_only: bool = False) -> BlogLinks:
     """Post links (in page order) and the engineering index, if the page links one.
 
     A blog's index mixes marketing with engineering writing; the engineering
     section, when there is one, is where the pain points are. Only same-site
     links under a blog-shaped section qualify, so a nav or footer link never
     costs a fetch.
+
+    `own_section_only` keeps only links under the index's own first segment
+    and never reports an engineering index. A press page's nav often links
+    the eng blog, and a blog post read again as press would pose as a second,
+    independent source for the very same words.
     """
     base = urlsplit(base_url)
     own_section = [s.lower() for s in base.path.split("/") if s][:1]
-    sections = _BLOG_SECTIONS | set(own_section)
+    sections = set(own_section) if own_section_only else _BLOG_SECTIONS | set(own_section)
     parser = _Anchors()
     parser.feed(html)
     parser.close()
@@ -79,7 +84,8 @@ def find_blog_links(html: str, base_url: str) -> BlogLinks:
         seen.add(url)
 
         second = segments[1].lower()
-        if len(segments) == 2 and "engineering" in second and engineering_index is None:
+        if (not own_section_only and len(segments) == 2 and "engineering" in second
+                and engineering_index is None):
             engineering_index = url
             continue
         if second in _NOT_A_POST:
