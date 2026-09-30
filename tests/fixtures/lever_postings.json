@@ -1,0 +1,23 @@
+[
+  {
+    "text": "Backend Engineer",
+    "workplaceType": "hybrid",
+    "country": "US",
+    "categories": {"location": "New York, NY", "commitment": "Full-time"},
+    "hostedUrl": "https://jobs.lever.co/zeta/0001"
+  },
+  {
+    "text": "Backend Engineer",
+    "workplaceType": "remote",
+    "country": "CA",
+    "categories": {"location": "Remote - Canada", "commitment": "Full-time"},
+    "hostedUrl": "https://jobs.lever.co/zeta/0002"
+  },
+  {
+    "text": "Backend Engineer",
+    "workplaceType": "unspecified",
+    "country": "US",
+    "categories": {"location": "Remote - US", "commitment": "Full-time"},
+    "hostedUrl": "https://jobs.lever.co/zeta/0003"
+  }
+]

@@ -5,6 +5,7 @@ import pytest
 from outreach.net.fetcher import Fetcher
 from outreach.sources.jobboards.fake import FakeJobBoardSource
 from outreach.sources.jobboards.greenhouse import GreenhouseBoardSource
+from outreach.sources.jobboards.multi import MultiBoardSource
 from outreach.types import PostingRef
 
 
@@ -13,9 +14,22 @@ def empty_greenhouse():
     return GreenhouseBoardSource(Fetcher(client, sleep=lambda s: None), ())
 
 
-@pytest.fixture(params=[lambda: FakeJobBoardSource([]), empty_greenhouse])
+def empty_multi():
+    return MultiBoardSource([FakeJobBoardSource([]), empty_greenhouse()])
+
+
+@pytest.fixture(params=["fake", "empty_greenhouse", "ashby", "lever", "multi"])
 def source(request):
-    return request.param()
+    # Ashby and Lever are fixture-backed (see tests/conftest.py); the rest are empty.
+    if request.param == "ashby":
+        return request.getfixturevalue("ashby_source")
+    if request.param == "lever":
+        return request.getfixturevalue("lever_source")
+    return {
+        "fake": lambda: FakeJobBoardSource([]),
+        "empty_greenhouse": empty_greenhouse,
+        "multi": empty_multi,
+    }[request.param]()
 
 
 def test_search_returns_a_list_of_posting_refs(source):

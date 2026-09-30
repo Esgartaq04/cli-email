@@ -1,0 +1,45 @@
+{
+  "apiVersion": "1",
+  "jobs": [
+    {
+      "title": "Backend Engineer",
+      "location": "Remote - US",
+      "isListed": true,
+      "isRemote": true,
+      "workplaceType": "Remote",
+      "employmentType": "FullTime",
+      "jobUrl": "https://jobs.ashbyhq.com/acme/0001",
+      "address": {"postalAddress": {"addressCountry": "United States"}}
+    },
+    {
+      "title": "Backend Engineer",
+      "location": "Remote - Canada",
+      "isListed": true,
+      "isRemote": true,
+      "workplaceType": "Remote",
+      "employmentType": "FullTime",
+      "jobUrl": "https://jobs.ashbyhq.com/acme/0002",
+      "address": {"postalAddress": {"addressCountry": "Canada"}}
+    },
+    {
+      "title": "Backend Engineer Intern",
+      "location": "San Francisco, CA",
+      "isListed": true,
+      "isRemote": false,
+      "workplaceType": "OnSite",
+      "employmentType": "Intern",
+      "jobUrl": "https://jobs.ashbyhq.com/acme/0003",
+      "address": {"postalAddress": {"addressCountry": "United States"}}
+    },
+    {
+      "title": "Backend Engineer",
+      "location": "Remote - US",
+      "isListed": false,
+      "isRemote": true,
+      "workplaceType": "Remote",
+      "employmentType": "FullTime",
+      "jobUrl": "https://jobs.ashbyhq.com/acme/0004",
+      "address": {"postalAddress": {"addressCountry": "United States"}}
+    }
+  ]
+}
