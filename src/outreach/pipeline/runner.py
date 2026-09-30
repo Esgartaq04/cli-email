@@ -10,7 +10,8 @@ from outreach.core.clustering import cluster_by_theme
 from outreach.core.dedupe import canonical_domain
 from outreach.core.gate import GateVerdict, evaluate
 from outreach.core.ranking import rank_contacts
-from outreach.core.stage import exceeds_cap
+from outreach.core.stage import classify_stage, exceeds_cap, stage_sort_key
+from outreach.core.themes import BUILDING_THEMES, SIGNAL_THEMES
 from outreach.core.workmode import posting_matches
 from outreach.extraction.changelog import split_changelog
 from outreach.extraction.extract import extract_and_persist
@@ -22,9 +23,9 @@ from outreach.sources.base import SurfaceTarget
 from outreach.sources.surfaces.blog import find_blog_links
 from outreach.sources.surfaces.github import find_github_org, parse_repos
 from outreach.sources.surfaces.standard import surface_targets
-from outreach.types import (ALL_WORK_MODES, Company, EvidenceItem, FetchAttempt, Finding,
-                            PersonRef, PostingRef, SourceClass, SourceDocument,
-                            WorkMode)
+from outreach.types import (ALL_WORK_MODES, Company, CompanyFacts, EvidenceItem,
+                            FetchAttempt, Finding, PersonRef, PostingRef, SourceClass,
+                            SourceDocument, Stage, WorkMode)
 
 # The stage names this runner actually checkpoints, in the order it writes
 # them. There is no separate "profile" checkpoint: profiling a company is
@@ -38,14 +39,19 @@ STAGES = ("discover", "enrich", "evidence", "contacts", "synthesize")
 # post, a changelog entry and a GitHub repo are dated artifacts and carry
 # their own date -- from the post's markup, the entry's heading, the repo's
 # last push. Where none can be read, `published_at` stays None and the gate
-# treats the evidence as not fresh. That fails toward the no-bottleneck
+# treats the evidence as not fresh. That fails toward the no-findings
 # branch, which is the safe direction: we would rather stay silent about a
-# company than claim stale pain is current.
+# company than claim stale work is current.
 CURRENT_STATE_CLASSES = frozenset({
     SourceClass.CAREERS_PAGE,
     SourceClass.JOB_POSTING,
     SourceClass.ABOUT,
 })
+
+# Evidence the stage classifier reads. "new-market" is also a building theme:
+# entering a market is both something a company is building and a sign that it
+# is scaling, so it can be a finding AND promote a growth company to expansion.
+_STAGE_SIGNAL_THEMES = frozenset(SIGNAL_THEMES) | {"new-market"}
 
 # Fetches that reach a host other than the company's own, so answering says
 # nothing about whether a guessed domain is real: a job posting usually lives
@@ -65,7 +71,7 @@ class RunSummary:
     excluded_no_matching_posting: int = 0
     facts_fetched: int = 0
     facts_cached: int = 0
-    # Companies per startup stage; filled once stage classification lands.
+    # Companies per startup stage, keyed by `Stage.value`.
     stage_counts: dict[str, int] = field(default_factory=dict)
     quotes_accepted: int = 0
     quotes_rejected: int = 0
@@ -219,6 +225,30 @@ def run_pipeline(
             summary.errors.append(f"evidence {company_id}: {exc}")
             ctx.runs.set_stage(run_id, company_id, "evidence", "failed", error=str(exc))
 
+    # --- classify (per company, isolated; not a checkpoint) -------------
+    # A pure function of the stored facts and evidence, so it is simply
+    # recomputed on every run and resume: skipping it on resume would leave
+    # contacts with no order to spend credits in. A company whose research
+    # failed is still classified -- Hunter's facts alone often place it, and
+    # the report lists every researched company under a stage.
+    contact_priority: dict[int, tuple] = {}
+    for company_id in research_ids:
+        try:
+            company = ctx.companies.get(company_id)
+            signals = [i for i in ctx.evidence.for_company(run_id, company_id)
+                       if i.theme in _STAGE_SIGNAL_THEMES]
+            result = classify_stage(facts_of(company), signals, ctx.today,
+                                    ctx.config.stage)
+            ctx.runs.set_company_stage(run_id, company_id, result)
+        except Exception as exc:
+            # An unclassified company is still researched and still gets
+            # contacts, just behind the ones we know are worth it.
+            summary.errors.append(f"classify {company_id}: {exc}")
+            continue
+        contact_priority[company_id] = stage_sort_key(result.stage, company.headcount)
+        key = result.stage.value
+        summary.stage_counts[key] = summary.stage_counts.get(key, 0) + 1
+
     # --- contacts (quota-aware) -----------------------------------------
     # A Greenhouse board token is a guessed domain label, never a confirmed
     # one (see `sources/jobboards/greenhouse.py`): `acmecorp` is not
@@ -248,6 +278,12 @@ def run_pipeline(
             except Exception as exc:
                 summary.errors.append(f"contacts {company_id}: {exc}")
             summary.skipped_domain_unconfirmed += 1
+    # Credits run out in the order companies are paid for, so the ones this
+    # tool exists for (growth and expansion) go first rather than whichever
+    # the job board happened to list first. The id breaks ties so two runs
+    # over the same companies spend the same way.
+    unclassified = stage_sort_key(Stage.UNKNOWN, None)
+    pending.sort(key=lambda c: (contact_priority.get(c, unclassified), c))
     for company_id in pending:
         if credit_error is not None:
             # We never learned the balance: an outage, not a shortfall.
@@ -270,7 +306,7 @@ def run_pipeline(
             summary.skipped_quota += 1
             continue
         try:
-            _resolve_contacts(ctx, company_id, role_title)
+            _resolve_contacts(ctx, company_id, role_title, budget, summary)
             ctx.runs.set_stage(run_id, company_id, "contacts", "ok")
         except Exception as exc:
             summary.failures += 1
@@ -289,8 +325,8 @@ def run_pipeline(
     for company_id in research_ids:
         if ctx.runs.stage_status(run_id, company_id, "evidence") != "ok":
             # Research never completed for this company. Recording "no
-            # bottleneck found" would be a verdict about work we did not
-            # do; the failure is already on the record as a stage row.
+            # findings" would be a verdict about work we did not do; the
+            # failure is already on the record as a stage row.
             continue
         if ctx.runs.stage_status(run_id, company_id, "synthesize") == "ok":
             continue
@@ -656,7 +692,7 @@ def _sweep_postings(ctx: RunContext, run_id: int, company_id: int, domain: str,
 
     A posting for the very role being researched is first-party, current
     evidence, and a different source class from a blog post -- which is what
-    lets a bottleneck be corroborated at all.
+    lets a finding be corroborated at all.
     """
     seen: set[str] = set()
     for posting in postings:
@@ -672,7 +708,22 @@ def _sweep_postings(ctx: RunContext, run_id: int, company_id: int, domain: str,
         _ingest(ctx, run_id, company_id, domain, SourceClass.JOB_POSTING, outcome, summary)
 
 
-def _resolve_contacts(ctx: RunContext, company_id: int, role_title: str) -> None:
+def facts_of(company: Company) -> CompanyFacts | None:
+    """The company's stored facts in the shape the stage classifier reads.
+
+    None when nothing about its size, age or funding is known, so the
+    classifier takes its no-facts path; tags alone say nothing about stage.
+    """
+    if (company.headcount is None and not company.headcount_band
+            and company.founded_year is None and not company.funding_rounds):
+        return None
+    return CompanyFacts(company.headcount, company.headcount_band, company.founded_year,
+                        company.funding_rounds, company.tags,
+                        company.headcount_source or "hunter")
+
+
+def _resolve_contacts(ctx: RunContext, company_id: int, role_title: str,
+                      budget: CreditBudget, summary: RunSummary) -> None:
     company = ctx.companies.get(company_id)
     keywords = role_title.lower().split()
     people = ctx.contact_provider.find(company.canonical_domain, keywords)
@@ -703,49 +754,93 @@ def _resolve_contacts(ctx: RunContext, company_id: int, role_title: str) -> None
             # No address to verify at all.
             status, email = "not_found", None
 
+        profile_url = person.profile_url
+        if profile_url is None and (prior is None or prior.profile_url is None):
+            # A profile we already stored is kept by the upsert's COALESCE,
+            # so it is never bought twice.
+            profile_url = _lookup_profile(ctx, company, person.full_name, budget, summary)
+
         resolved = PersonRef(
             full_name=person.full_name, title=person.title,
-            profile_url=person.profile_url, email=email, email_status=status,
+            profile_url=profile_url, email=email, email_status=status,
         )
         ctx.contacts.upsert(company_id, resolved, "provider", datetime.now())
 
 
+def _lookup_profile(ctx: RunContext, company: Company, full_name: str,
+                    budget: CreditBudget, summary: RunSummary) -> str | None:
+    """One paid lookup of a ranked contact's LinkedIn profile, or None.
+
+    A failure is this person's, not the company's: the contact and its
+    verified address are still worth storing without a profile link.
+    """
+    names = full_name.split()
+    # The finder is asked by first and last name; one token is not a name it
+    # can match, and a credit spent on it buys nothing.
+    if (len(names) < 2 or not ctx.config.hunter.linkedin_lookup
+            or not budget.try_spend(ctx.config.hunter.finder_cost)):
+        return None
+    try:
+        return ctx.contact_provider.find_profile(company.canonical_domain,
+                                                 names[0], names[-1])
+    except Exception as exc:
+        summary.errors.append(f"linkedin {company.id} {full_name}: {exc}")
+        return None
+
+
 def _synthesize(ctx: RunContext, run_id: int, company_id: int,
                 summary: RunSummary) -> None:
-    """Pick the strongest theme that clears the gate, or record why none did.
+    """Record what the company is building: up to `max_findings_per_company`
+    themes that clear the gate, or one row saying why none did.
+
+    Only building themes are candidates. A funding round or a new office
+    already did its work in stage classification, and "they raised a Series
+    A" is not something a company is building.
 
     The gate is evaluated per theme, never across the whole pile: two
-    unrelated complaints from two surfaces are not one corroborated
-    bottleneck, and evaluating them together would manufacture the
-    independence the gate exists to demand.
+    unrelated claims from two surfaces are not one corroborated finding, and
+    evaluating them together would manufacture the independence the gate
+    exists to demand.
     """
-    items = ctx.evidence.for_company(run_id, company_id)
-    passing: list[tuple[str, list[EvidenceItem], GateVerdict]] = []
-    for theme, cluster in cluster_by_theme(items).items():
+    building = [i for i in ctx.evidence.for_company(run_id, company_id)
+                if i.theme in BUILDING_THEMES]
+    passing: list[tuple[int, str, list[EvidenceItem], GateVerdict]] = []
+    for theme, cluster in cluster_by_theme(building).items():
         verdict = evaluate(cluster, ctx.config.gate, ctx.today)
         if verdict.passed:
-            passing.append((theme, cluster, verdict))
+            passing.append((_independent_sources(cluster), theme, cluster, verdict))
 
-    # Most corroborated theme wins; the theme name breaks ties so two runs
-    # over the same evidence always pick the same bottleneck.
-    best = min(passing, key=lambda t: (-len(t[1]), t[0]), default=None)
+    # Most independently sourced first, then most quoted; the theme name
+    # breaks ties so two runs over the same evidence keep the same findings.
+    passing.sort(key=lambda p: (-p[0], -len(p[2]), p[1]))
+    findings = []
+    for sources, theme, cluster, verdict in passing[:ctx.config.gate.max_findings_per_company]:
+        quotes = [i.quote for i in cluster]
+        findings.append(Finding(
+            None, company_id, theme, cluster[0].claim,
+            ctx.llm.write_summary(cluster[0].claim, quotes),
+            corroborated=sources >= 2, passed=True, reason="passed",
+            evidence_ids=verdict.evidence_ids))
 
-    # Still the single-verdict shape of the old bottleneck: one passing
-    # theme, or one row saying why none passed.
-    if best is None:
+    # Cleared only once every summary is written: a `write_summary` that
+    # raises part-way leaves the previous attempt's rows, not half of these.
+    # Cleared at all because `findings` has no unique key, so a resumed
+    # synthesis would otherwise stack a second copy of every row.
+    ctx.findings.clear_for_company(run_id, company_id)
+    if not findings:
         ctx.findings.insert(run_id, Finding(
-            None, company_id, "", "", "", False, False, _failure_reason(ctx, items), ()))
+            None, company_id, "", "", "", False, False,
+            _failure_reason(ctx, building), ()))
         summary.no_findings += 1
         return
-
-    theme, cluster, verdict = best
-    quotes = [i.quote for i in cluster]
-    ctx.findings.insert(run_id, Finding(
-        None, company_id, theme, cluster[0].claim,
-        ctx.llm.write_summary(cluster[0].claim, quotes),
-        corroborated=False, passed=True, reason=verdict.reason,
-        evidence_ids=verdict.evidence_ids))
+    for finding in findings:
+        ctx.findings.insert(run_id, finding)
     summary.evidenced += 1
+
+
+def _independent_sources(cluster: Sequence[EvidenceItem]) -> int:
+    """How many independent sources back a cluster -- the gate's own key."""
+    return len({(i.source_class, i.publisher_domain) for i in cluster})
 
 
 def _failure_reason(ctx: RunContext, items: Sequence[EvidenceItem]) -> str:

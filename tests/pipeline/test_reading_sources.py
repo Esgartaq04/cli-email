@@ -12,7 +12,7 @@ from outreach.sources.jobboards.fake import FakeJobBoardSource
 from outreach.types import PostingRef, SourceClass
 from tests.pipeline.factories import TODAY, build_context, company_id
 
-THEME = "scaling-bottlenecks"
+THEME = "active-build"
 
 
 def _page(body: str, published: str | None = None) -> str:
@@ -135,23 +135,27 @@ def test_the_matching_job_posting_is_read_as_current_first_party_evidence():
     assert postings[0].publisher_domain == "blogco.example"
 
 
-def test_a_blog_and_a_job_posting_corroborate_one_bottleneck():
-    """Two source classes on one theme is exactly what the gate asks for."""
+def test_a_blog_and_a_job_posting_corroborate_one_finding():
+    """Two source classes on one theme is what makes a finding corroborated."""
     ctx = _ctx()
     summary = run_pipeline(ctx, "Backend Engineer", "fintech")
     assert summary.evidenced == 1
     assert summary.no_findings == 0
+    findings = ctx.findings.for_company(summary.run_id, 1)
+    assert [(f.theme, f.corroborated) for f in findings] == [(THEME, True)]
 
 
-def test_blog_posts_alone_cannot_pass_the_gate():
-    # The shared factory gate now needs one source; this test is about a
-    # two-source gate refusing a single source class, so it asks for one.
-    ctx = _ctx(posting_url="https://blogco.example/jobs/missing")
-    ctx = replace(ctx, config=replace(
-        ctx.config, gate=replace(ctx.config.gate, min_independent_sources=2)))
+def test_undated_blog_index_text_alone_cannot_pass_the_gate():
+    """One source is enough for a finding, but only a current one: a blog
+    index states no date, so its text alone is never fresh."""
+    site = {"/blog": _page("<p>QUOTE-A the ledger job no longer fits its window.</p>")}
+    ctx = _ctx(site=site, posting_url="https://blogco.example/jobs/missing")
+    assert ctx.config.gate.min_independent_sources == 1
     summary = run_pipeline(ctx, "Backend Engineer", "fintech")
     assert summary.evidenced == 0
     assert summary.no_findings == 1
+    assert [(f.passed, f.reason) for f in ctx.findings.for_company(summary.run_id, 1)] == [
+        (False, "all_evidence_stale")]
 
 
 def test_a_job_posting_hosted_elsewhere_does_not_confirm_a_guessed_domain():

@@ -42,6 +42,9 @@ class CountingProvider:
     def find(self, domain, role_keywords):
         return self.inner.find(domain, role_keywords)
 
+    def find_profile(self, domain, first_name, last_name):
+        return self.inner.find_profile(domain, first_name, last_name)
+
     def verify(self, email):
         self.verify_calls.append(email)
         return self.inner.verify(email)
@@ -56,6 +59,18 @@ def test_happy_path_produces_an_evidenced_company():
     assert summary.companies == 2
     assert summary.evidenced == 1
     assert summary.no_findings == 1
+
+    # good.example's three quotes share one building theme across three
+    # independent surfaces: one corroborated finding. thin.example quoted
+    # nothing, so its one row is a miss that says why.
+    good = company_id(ctx, "good.example")
+    assert [(f.theme, f.corroborated, f.passed, len(f.evidence_ids))
+            for f in ctx.findings.for_company(summary.run_id, good)] == [
+        ("active-build", True, True, 3)]
+    thin = company_id(ctx, "thin.example")
+    assert [(f.passed, f.reason)
+            for f in ctx.findings.for_company(summary.run_id, thin)] == [
+        (False, "no_evidence")]
 
 
 def test_one_company_failing_does_not_abort_the_run():
@@ -123,14 +138,13 @@ def test_only_current_state_surfaces_are_dated_with_the_fetch_date():
 
 
 def test_a_failed_company_gets_no_fabricated_verdict():
-    """`no bottleneck found` about a company we never researched is a lie."""
+    """`no findings` about a company we never researched is a lie."""
     ctx = build_context(explode_on_domain="bad.example")
     summary = run_pipeline(ctx, "Backend Engineer", "fintech")
 
     bad = ctx.companies.upsert("bad.example", "Bad Co", None, None)
     assert ctx.runs.stage_status(summary.run_id, bad, "evidence") == "failed"
-    verdicts = [b.company_id for b in ctx.findings.for_run(summary.run_id)]
-    assert bad not in verdicts
+    assert bad not in [f.company_id for f in ctx.findings.for_run(summary.run_id)]
 
 
 def test_a_malformed_posting_does_not_cost_the_other_companies():
@@ -259,9 +273,11 @@ def test_one_failing_surface_still_lets_the_company_reach_a_verdict():
     assert summary.evidenced == 1
     assert any("changelog blew up" in e for e in summary.errors)
 
-    verdicts = {b.company_id: b.passed
-                for b in ctx.findings.for_run(summary.run_id)}
-    assert verdicts[good] is True
+    # The careers and blog quotes still agree on one theme: the finding stands,
+    # corroborated, without the changelog.
+    assert [(f.theme, f.corroborated, f.passed)
+            for f in ctx.findings.for_company(summary.run_id, good)] == [
+        ("active-build", True, True)]
 
 
 def test_a_company_whose_every_surface_fails_is_marked_failed():
@@ -431,13 +447,12 @@ def test_a_set_stage_failure_for_one_company_does_not_abort_the_run():
     assert any("database is locked" in e for e in summary.errors)
     assert ctx.runs.stage_status(summary.run_id, good, "evidence") == "failed"
 
-    # No fabricated verdict for the company whose checkpoint write failed.
-    verdicts = {b.company_id: b.passed for b in ctx.findings.for_run(summary.run_id)}
-    assert good not in verdicts
+    # No fabricated finding (or miss) for the company whose checkpoint write
+    # failed.
+    assert ctx.findings.for_company(summary.run_id, good) == []
 
     # The other company was never touched by the injected failure and still
-    # reached a verdict.
+    # reached its no-findings verdict.
     thin = ctx.companies.upsert("thin.example", "Thin Co", None, None)
-    assert thin in verdicts
-    assert verdicts[thin] is False  # thin.example is the no-bottleneck company
+    assert [f.passed for f in ctx.findings.for_company(summary.run_id, thin)] == [False]
     assert summary.no_findings == 1
