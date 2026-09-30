@@ -139,6 +139,43 @@
   .pages .none { color: var(--faint); }
   .pages a { color: var(--muted); word-break: break-all; }
 
+  .co-facts > span + span::before { content: "·"; margin: 0 8px; color: var(--faint); }
+  .stage {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 11.5px; font-weight: 600; letter-spacing: .02em;
+    border: 1px solid var(--border-strong); color: var(--muted);
+  }
+  .stage-growth, .stage-expansion { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+  .stage-maturity { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+  .stage-why { color: var(--faint); font-size: 12.5px; margin-top: 2px; }
+
+  .postings { list-style: none; margin: 12px 0 0; padding: 0; font-size: 13.5px; }
+  .postings li { padding: 2px 0; }
+  .postings a { color: var(--text); }
+  .work-mode {
+    font-family: var(--mono); font-size: 11px; padding: 1px 6px; margin-left: 8px;
+    border-radius: 4px; border: 1px solid var(--border-strong); color: var(--muted);
+  }
+
+  .building, .hooks { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 14px; }
+  .building h3, .hooks h3 { font-size: 11.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--faint); margin: 0 0 10px; font-weight: 600; }
+  .finding + .finding { margin-top: 22px; }
+  .finding-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+  .finding .claim { margin-top: 6px; }
+  .badge.corroborated { background: var(--accent); color: var(--surface); }
+  .hooks ul { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+  .hooks li { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; padding: 3px 0; color: var(--muted); }
+  .hooks a { color: var(--text); word-break: break-all; }
+
+  .p-links { flex: 0 1 auto; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+  .p-li { font-size: 12.5px; color: var(--accent); }
+  .p-li.search { color: var(--muted); }
+
+  .excluded { list-style: none; margin: 0; padding: 0; font-size: 13.5px; }
+  .excluded li { padding: 6px 0; border-bottom: 1px dashed var(--border); color: var(--muted); }
+  .excluded .ex-name { color: var(--text); font-weight: 600; margin-right: 8px; }
+  .empty { color: var(--faint); font-size: 13.5px; }
+
   footer.diag {
     margin-top: 44px; padding-top: 18px; border-top: 1px solid var(--border);
     font-size: 13px; color: var(--muted);
@@ -158,11 +195,30 @@
   <h1>{{ view.role_title }} · {{ view.sector }}</h1>
   <div class="run-meta">
     <span>{{ view.run_date.strftime('%d %b %Y') }}</span>
-    <span>{{ view.evidenced|length + view.no_bottleneck|length }} companies</span>
-    <span>{{ view.evidenced|length }} evidenced</span>
-    <span>{{ view.no_bottleneck|length }} no bottleneck</span>
+    <span>≤ {{ '{:,}'.format(view.headcount_max) }} employees</span>
+    <span>{{ view.target_stage|length + view.other_stages|length + view.no_findings|length }} companies researched</span>
+    <span>{{ view.target_stage|length }} growth &amp; expansion</span>
+    <span>{{ view.other_stages|length }} other stages</span>
+    <span>{{ view.no_findings|length }} no building evidence</span>
+    <span>{{ view.excluded|length }} excluded</span>
   </div>
 </header>
+
+{% macro evidence_block(e) %}
+  <div class="ev">
+    <blockquote>{{ e.quote }}</blockquote>
+    <div class="ev-meta">
+      <span class="badge{% if e.source_class == 'news' %} third{% endif %}">
+        {{ e.source_class.replace('_', ' ') }}</span>
+      <span>{% if e.published_at %}
+              {% if e.source_class in current_state_classes %}
+                current as of {{ e.published_at.strftime('%d %b') }}
+              {% else %}{{ e.published_at.strftime('%d %b %Y') }}{% endif %}
+            {% else %}undated{% endif %}</span>
+      <a href="{{ e.url }}">{{ e.url }}</a>
+    </div>
+  </div>
+{% endmacro %}
 
 {% macro contacts_block(company) %}
   {% if not company.domain_confirmed %}
@@ -182,12 +238,20 @@
         <div class="p-title">{{ c.title }}</div>
         <div class="p-why">{{ c.why }}</div>
       </div>
-      {% if c.email_status == 'verified' and c.email %}
-        <div class="p-mail ok">{{ c.email }}</div>
-      {% else %}
-        <div class="p-mail none">no verified address{% if c.profile_url %} —
-          <a href="{{ c.profile_url }}">profile</a>{% endif %}</div>
-      {% endif %}
+      <div class="p-links">
+        {% if c.email_status == 'verified' and c.email %}
+          <div class="p-mail ok">{{ c.email }}</div>
+        {% else %}
+          <div class="p-mail none">no verified address</div>
+        {% endif %}
+        {# A found profile is linked as itself; without one, a search is
+           offered and labelled as a search, never as the person's profile. #}
+        {% if c.profile_url %}
+          <a class="p-li" href="{{ c.profile_url }}">LinkedIn</a>
+        {% elif c.linkedin_search %}
+          <a class="p-li search" href="{{ c.linkedin_search }}">Search LinkedIn</a>
+        {% endif %}
+      </div>
     </div>
     {% endfor %}
   </div>
@@ -205,22 +269,9 @@
         <span class="theme-facts">{{ t.evidence|length }} quote{{ '' if t.evidence|length == 1 else 's' }}
           · {{ t.source_labels|join(', ') }}</span>
         <span class="theme-short">{{ t.independent_sources }} of {{ view.min_independent_sources }}
-          independent sources — {{ reason_text.get(t.reason, t.reason) }}</span>
+          independent sources — {{ reason_text(t.reason) }}</span>
       </summary>
-      {% for e in t.evidence %}
-      <div class="ev">
-        <blockquote>{{ e.quote }}</blockquote>
-        <div class="ev-meta">
-          <span class="badge">{{ e.source_class.replace('_', ' ') }}</span>
-          <span>{% if e.published_at %}
-                  {% if e.source_class in current_state_classes %}
-                    current as of {{ e.published_at.strftime('%d %b') }}
-                  {% else %}{{ e.published_at.strftime('%d %b %Y') }}{% endif %}
-                {% else %}undated{% endif %}</span>
-          <a href="{{ e.url }}">{{ e.url }}</a>
-        </div>
-      </div>
-      {% endfor %}
+      {% for e in t.evidence %}{{ evidence_block(e) }}{% endfor %}
     </details>
     {% endfor %}
   </div>
@@ -243,51 +294,77 @@
   {% endif %}
 {% endmacro %}
 
-<h2 class="section">Evidenced bottlenecks</h2>
-{% for company in view.evidenced %}
+{% macro card(company) %}
 <article class="card">
   <div class="card-head">
     <span class="co-name">{{ company.name }}</span>
     <span class="co-domain">{{ company.domain }}</span>
+    <span class="stage stage-{{ company.stage }}">{{ company.stage_label }}</span>
   </div>
+  {% if company.stage_reasons %}
+  <div class="stage-why">{{ company.stage_reasons|join(' · ') }}</div>
+  {% endif %}
   <div class="co-facts">
-    {% if company.headcount %}~{{ company.headcount }} employees
-      <span class="src">({{ company.headcount_source }})</span>
-    {% else %}headcount unknown{% endif %}
+    <span>{% if company.headcount is not none %}~{{ company.headcount }} employees
+        <span class="src">({{ company.headcount_source }})</span>
+      {% elif company.headcount_band %}{{ company.headcount_band }} employees
+      {% else %}headcount unknown{% endif %}</span>
+    {% if company.founded_year %}<span>founded {{ company.founded_year }}</span>{% endif %}
+    {% if company.latest_round %}<span>latest round {{ company.latest_round }}</span>{% endif %}
   </div>
-  <p class="claim">{{ company.claim }}</p>
-  <p class="summary">{{ company.summary }}</p>
-  {% for e in company.evidence %}
-  <div class="ev">
-    <blockquote>{{ e.quote }}</blockquote>
-    <div class="ev-meta">
-      <span class="badge{% if e.source_class == 'news' %} third{% endif %}">
-        {{ e.source_class.replace('_', ' ') }}</span>
-      <span>{% if e.published_at %}
-              {% if e.source_class in current_state_classes %}
-                current as of {{ e.published_at.strftime('%d %b') }}
-              {% else %}{{ e.published_at.strftime('%d %b %Y') }}{% endif %}
-            {% else %}undated{% endif %}</span>
-      <a href="{{ e.url }}">{{ e.url }}</a>
-    </div>
-  </div>
-  {% endfor %}
-  {{ contacts_block(company) }}
-</article>
-{% endfor %}
 
-<h2 class="section">No bottleneck found</h2>
-{% for company in view.no_bottleneck %}
-<article class="card">
-  <div class="card-head">
-    <span class="co-name">{{ company.name }}</span>
-    <span class="co-domain">{{ company.domain }}</span>
+  {% if company.postings %}
+  <ul class="postings">
+    {% for p in company.postings %}
+    <li><a href="{{ p.url }}">{{ p.title }}</a><span class="work-mode">{{ p.work_mode }}</span></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  {% if company.findings %}
+  <div class="building">
+    <h3>What they're building</h3>
+    {% for f in company.findings %}
+    <div class="finding">
+      <div class="finding-head">
+        <span class="theme-name">{{ f.theme }}</span>
+        {% if f.corroborated %}<span class="badge corroborated">corroborated</span>{% endif %}
+      </div>
+      <p class="claim">{{ f.claim }}</p>
+      <p class="summary">{{ f.summary }}</p>
+      {% for e in f.evidence %}{{ evidence_block(e) }}{% endfor %}
+    </div>
+    {% endfor %}
   </div>
-  <div class="co-facts">
-    {% if company.headcount %}~{{ company.headcount }} employees
-      <span class="src">({{ company.headcount_source }})</span>
-    {% else %}headcount unknown{% endif %}
+  {% elif company.reason == 'research_failed' %}
+  <p class="why-none"><strong>Research failed:</strong>
+    {{ reason_text(company.reason) }}
+    ({{ company.reason }}){% if company.error %} — {{ company.error }}{% endif %}.</p>
+  {{ findings_block(company) }}
+  {% else %}
+  <p class="why-none"><strong>Gate failed:</strong>
+    {{ reason_text(company.reason) }}
+    ({{ company.reason }}).</p>
+  {{ findings_block(company) }}
+  {% endif %}
+
+  {% if company.hooks %}
+  <div class="hooks">
+    <h3>Hooks for a build</h3>
+    <ul>
+      {% for h in company.hooks %}
+      <li>
+        <span class="badge">{{ h.kind }}</span>
+        <a href="{{ h.url }}">{{ h.label }}</a>
+        {% if h.when %}<span>{% if h.kind == 'repo' %}pushed {% endif %}{{ h.when.strftime('%d %b %Y') }}</span>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
   </div>
+  {% endif %}
+
+  {{ contacts_block(company) }}
+
   {% if company.fetch_log %}
   <div class="fetchlog">
     {% for source_class, outcome, status in company.fetch_log %}
@@ -297,21 +374,44 @@
     {% endfor %}
   </div>
   {% endif %}
-  {% if company.reason == 'research_failed' %}
-  <p class="why-none"><strong>Research failed:</strong>
-    {{ reason_text.get(company.reason, company.reason) }}
-    ({{ company.reason }}){% if company.error %} — {{ company.error }}{% endif %}.</p>
-  {% else %}
-  <p class="why-none"><strong>Gate failed:</strong>
-    {{ reason_text.get(company.reason, company.reason) }}
-    ({{ company.reason }}).</p>
-  {% endif %}
-  {{ findings_block(company) }}
-  {{ contacts_block(company) }}
 </article>
-{% endfor %}
+{% endmacro %}
 
-<footer class="diag">
+<section id="target-stage">
+<h2 class="section">Growth &amp; Expansion</h2>
+{% for company in view.target_stage %}{{ card(company) }}
+{% else %}<p class="empty">No growth or expansion company showed building evidence.</p>
+{% endfor %}
+</section>
+
+<section id="other-stages">
+<h2 class="section">Other stages</h2>
+{% for company in view.other_stages %}{{ card(company) }}
+{% else %}<p class="empty">None.</p>
+{% endfor %}
+</section>
+
+<section id="no-findings">
+<h2 class="section">No building evidence</h2>
+{% for company in view.no_findings %}{{ card(company) }}
+{% else %}<p class="empty">None.</p>
+{% endfor %}
+</section>
+
+<section id="excluded">
+<h2 class="section">Excluded</h2>
+{% if view.excluded %}
+<ul class="excluded">
+  {% for e in view.excluded %}
+  <li><span class="ex-name">{{ e.name }}</span><span class="co-domain">{{ e.domain }}</span>
+    — {{ reason_text(e.reason) }}</li>
+  {% endfor %}
+</ul>
+{% else %}<p class="empty">None.</p>
+{% endif %}
+</section>
+
+<footer class="diag" id="diagnostics">
   <h2>Run diagnostics</h2>
   <div class="diag-grid">
     {% for key, value in view.diagnostics.items() %}

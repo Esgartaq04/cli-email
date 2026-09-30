@@ -9,21 +9,18 @@ import httpx
 import typer
 from dotenv import load_dotenv
 
-from outreach.config import Config, ConfigError, load_config, require_env
-from outreach.core.clustering import cluster_by_theme
-from outreach.core.gate import evaluate
-from outreach.core.ranking import rank_contacts
+from outreach.config import ConfigError, load_config, require_env
 from outreach.net.fetcher import Fetcher, build_user_agent
 from outreach.pipeline.context import RunContext
 from outreach.pipeline.runner import RunSummary, run_pipeline
-from outreach.render.report import (ReportCompany, ReportContact, ReportEvidence,
-                                    ReportSource, ReportTheme, ReportView, write_report)
+from outreach.render.report import write_report
+# Also re-exported: `build_view` lived here before it moved to render/.
+from outreach.render.view import build_view
 from outreach.store.cache import DocumentCache
 from outreach.store.db import connect
 from outreach.store.dimensions import CompanyRepo, ContactRepo, DocumentRepo
 from outreach.store.runs import (EvidenceRepo, FetchAttemptRepo, FindingRepo, PostingRepo,
                                  RunRepo)
-from outreach.types import Company, Contact, PersonRef, SourceDocument
 
 app = typer.Typer(help="Outreach research pipeline")
 
@@ -75,186 +72,34 @@ def build_context(config_path: Path = Path("config.toml")) -> RunContext:
     )
 
 
-def _rank_and_cap_contacts(
-    stored: list[Contact], company: Company, keywords: list[str], config: Config
-) -> list[ReportContact]:
-    """Re-rank and cap `contacts.for_company` on read, per run.
+def _summary_from_storage(ctx: RunContext, run_id: int, role_title: str,
+                          sector: str) -> RunSummary:
+    """Rebuild what a v2 run's summary can honestly recover from storage.
 
-    `contacts.for_company` is company-scoped, not run-scoped: it returns
-    every contact ever stored for this company across every past run, and
-    `max_contacts_per_company` is applied only when a run WRITES contacts
-    (`rank_contacts` in `_resolve_contacts`), never when the report reads
-    them back. After a few runs a card could list far more than the
-    configured cap, including people surfaced under a different `--role`
-    whose title no longer scores against these keywords. Re-ranking and
-    truncating here, against THIS run's role, is what keeps the card
-    honest regardless of how many runs have touched this company.
+    Findings answer evidenced/no-findings, the stage rows answer how many
+    companies were discovered, excluded and classified, and the evidence
+    rows answer how many quotes were accepted. Everything else stays at its
+    default and is rendered "not recorded" by `build_view(..., fresh=False)`.
     """
-    by_name = {c.full_name: c for c in stored}
-    people = [PersonRef(c.full_name, c.title, c.profile_url, c.email, c.email_status)
-              for c in stored]
-    ranked = rank_contacts(people, company.headcount, keywords, config.ranking)
+    findings = ctx.findings.for_run(run_id)
+    evidenced = {f.company_id for f in findings if f.passed}
+    company_ids = ctx.runs.companies_for_run(run_id)
 
-    contacts: list[ReportContact] = []
-    for person, score in ranked:
-        why = score.explanation
-        orig = by_name.get(person.full_name)
-        if orig and orig.contacted_at:
-            why += f" · emailed {orig.contacted_at:%d %b}"
-        contacts.append(ReportContact(person.full_name, person.title, person.email,
-                                      person.email_status, person.profile_url, why))
-    return contacts
+    def count(stage: str, status: str) -> int:
+        return sum(1 for c in company_ids
+                   if ctx.runs.stage_status(run_id, c, stage) == status)
 
-
-def _findings(ctx: RunContext, run_id: int, company_id: int
-              ) -> tuple[list[ReportTheme], list[ReportSource]]:
-    """What a run found for a company, laid out for a reader asking "why not?".
-
-    Themes come with their own gate verdict because the gate is evaluated
-    per theme: a company can hold thirteen quotes and still have no theme
-    with two independent sources, and the reader needs to see that.
-    """
-    items = ctx.evidence.for_company(run_id, company_id)
-    docs = ctx.documents.for_company(company_id)
-    urls = {d.id: d.url for d in docs}
-
-    read_urls = {a.url for a in ctx.fetch_attempts.for_company(run_id, company_id)
-                 if a.outcome == "ok" and a.document_count}
-    latest: dict[str, SourceDocument] = {}
-    for d in docs:
-        if d.url in read_urls and (d.url not in latest or d.id > latest[d.url].id):
-            latest[d.url] = d
-    claims_per_doc = Counter(i.source_document_id for i in items)
-    sources = [ReportSource(d.url, d.source_class.value, d.published_at,
-                            claims_per_doc.get(d.id, 0))
-               for d in sorted(latest.values(), key=lambda d: d.id)]
-
-    themes: list[ReportTheme] = []
-    for theme, cluster in cluster_by_theme(items).items():
-        verdict = evaluate(cluster, ctx.config.gate, ctx.today)
-        themes.append(ReportTheme(
-            theme=theme,
-            evidence=[ReportEvidence(i.quote, i.source_class.value,
-                                     urls.get(i.source_document_id, ""), i.published_at)
-                      for i in cluster],
-            source_labels=sorted({i.source_class.value.replace("_", " ") for i in cluster}),
-            independent_sources=len({(i.source_class.value, i.publisher_domain)
-                                     for i in cluster}),
-            reason=verdict.reason,
-        ))
-    themes.sort(key=lambda t: (-t.independent_sources, -len(t.evidence), t.theme))
-    return themes, sources
-
-
-def build_view(ctx: RunContext, summary: RunSummary, fresh: bool = True) -> ReportView:
-    """Assemble the report view model from persisted rows.
-
-    `fresh` is True for a `summary` that just came out of `run_pipeline` in
-    this process, and False for one reconstructed from storage by `report`.
-    Reconstruction can't recover every figure honestly: rejected quotes are
-    discarded rather than kept, and per-stage quota/failure tallies aren't
-    retained past the run that produced them. Rendering those as "0" would
-    be indistinguishable from a run that genuinely had zero, which defeats
-    the one thing the diagnostics footer exists for -- catching silent
-    degradation -- so a reconstructed summary renders them as text saying
-    so instead of a number.
-    """
-    run_id = summary.run_id
-    evidenced: list[ReportCompany] = []
-    no_bottleneck: list[ReportCompany] = []
-    handled_company_ids: set[int] = set()
-
-    for bottleneck in ctx.bottlenecks.for_run(run_id):
-        company = ctx.companies.get(bottleneck.company_id)
-        keep = set(bottleneck.evidence_ids)
-        urls = {d.id: d.url for d in ctx.documents.for_company(bottleneck.company_id)}
-        evidence = [
-            ReportEvidence(item.quote, item.source_class.value,
-                           urls.get(item.source_document_id, ""), item.published_at)
-            for item in ctx.evidence.for_company(run_id, bottleneck.company_id)
-            if item.id in keep
-        ]
-        keywords = summary.role_title.lower().split()
-        contacts = _rank_and_cap_contacts(
-            ctx.contacts.for_company(bottleneck.company_id), company, keywords, ctx.config)
-        fetch_log = [
-            (a.source_class.value, a.outcome, a.http_status)
-            for a in ctx.fetch_attempts.for_company(run_id, bottleneck.company_id)
-        ]
-        contacts_stage = ctx.runs.stage_status(run_id, bottleneck.company_id, "contacts")
-        card = ReportCompany(
-            name=company.name, domain=company.canonical_domain,
-            headcount=company.headcount, headcount_source=company.headcount_source,
-            claim=bottleneck.claim, summary=bottleneck.summary,
-            reason=bottleneck.reason, evidence=evidence, contacts=contacts,
-            fetch_log=fetch_log,
-            domain_confirmed=contacts_stage != "skipped_domain_unconfirmed",
-        )
-        if not bottleneck.passed:
-            card.themes, card.sources_read = _findings(ctx, run_id, bottleneck.company_id)
-        (evidenced if bottleneck.passed else no_bottleneck).append(card)
-        handled_company_ids.add(bottleneck.company_id)
-
-    # A company whose research never completed gets no `bottlenecks` row at
-    # all (by design -- recording a verdict about work never done would be
-    # a lie). Without this pass it simply vanishes from the report: the
-    # only trace left is a mismatch between the header's company count and
-    # the diagnostics. `run_companies` is the complete list of companies
-    # this run touched, so anything in it with no bottleneck row is a
-    # research failure, surfaced with its coverage log and error text.
-    for company_id in ctx.runs.companies_for_run(run_id):
-        if company_id in handled_company_ids:
-            continue
-        company = ctx.companies.get(company_id)
-        fetch_log = [
-            (a.source_class.value, a.outcome, a.http_status)
-            for a in ctx.fetch_attempts.for_company(run_id, company_id)
-        ]
-        error = (ctx.runs.stage_error(run_id, company_id, "evidence")
-                 or ctx.runs.stage_error(run_id, company_id, "discover"))
-        themes, sources_read = _findings(ctx, run_id, company_id)
-        no_bottleneck.append(ReportCompany(
-            name=company.name, domain=company.canonical_domain,
-            headcount=company.headcount, headcount_source=company.headcount_source,
-            claim="", summary="", reason="research_failed",
-            evidence=[], contacts=[], fetch_log=fetch_log, error=error,
-            themes=themes, sources_read=sources_read,
-        ))
-
-    # Smallest and most bypassable first; unknown headcount sorts last.
-    evidenced.sort(key=lambda c: (c.headcount is None, c.headcount or 0))
-    no_bottleneck.sort(key=lambda c: (c.headcount is None, c.headcount or 0))
-
-    not_recorded = "not recorded"
-    return ReportView(
-        role_title=summary.role_title, sector=summary.sector, run_date=ctx.today,
-        headcount_min=ctx.config.discovery.headcount_min,
-        headcount_max=ctx.config.discovery.headcount_max,
-        evidenced=evidenced, no_bottleneck=no_bottleneck,
-        min_independent_sources=ctx.config.gate.min_independent_sources,
-        # Errors aren't persisted past the run that produced them either --
-        # same "not recorded" honesty as the diagnostics values below.
-        errors=summary.errors if fresh else ["not recorded"],
-        diagnostics={
-            "Companies discovered": str(summary.companies),
-            "Bottlenecks passed": f"{summary.evidenced} / {summary.companies}",
-            "Quotes accepted": str(summary.quotes_accepted),
-            "Quotes rejected": str(summary.quotes_rejected) if fresh else not_recorded,
-            "Skipped on quota": str(summary.skipped_quota) if fresh else not_recorded,
-            "Skipped — domain unconfirmed": (
-                str(summary.skipped_domain_unconfirmed) if fresh else not_recorded),
-            "Company failures": str(summary.failures) if fresh else not_recorded,
-            "Wall clock (s)": (
-                f"{summary.wall_clock_seconds:.1f}"
-                if fresh and summary.wall_clock_seconds is not None else not_recorded),
-            "Enrichment credits remaining": (
-                str(summary.credits_after)
-                if fresh and summary.credits_after is not None else not_recorded),
-            "Enrichment credits consumed": (
-                str(summary.credits_before - summary.credits_after)
-                if fresh and summary.credits_before is not None
-                and summary.credits_after is not None else not_recorded),
-        },
+    stages = (ctx.runs.company_stage(run_id, c) for c in company_ids)
+    return RunSummary(
+        run_id=run_id, role_title=role_title, sector=sector,
+        # A company excluded for its postings never counted as discovered.
+        companies=count("discover", "ok"),
+        evidenced=len(evidenced),
+        no_findings=len({f.company_id for f in findings} - evidenced),
+        excluded_size=count("enrich", "excluded_size"),
+        excluded_no_matching_posting=count("discover", "excluded_no_matching_posting"),
+        stage_counts=dict(Counter(s.stage.value for s in stages if s is not None)),
+        quotes_accepted=sum(len(ctx.evidence.for_company(run_id, c)) for c in company_ids),
     )
 
 
@@ -325,11 +170,13 @@ def report(run_id: int = typer.Argument(..., help="A previous run's id")) -> Non
     """Re-render a completed run's report from what is already stored.
 
     No adapter is touched — every field this needs was already persisted by
-    `run`. Two figures cannot be recovered honestly from storage: rejected
+    `run`. Some figures cannot be recovered honestly from storage: rejected
     quotes are discarded rather than kept (nothing to count), and per-stage
-    quota/failure tallies are not retained past the run that produced them.
-    `build_view(..., fresh=False)` renders both as "not recorded" in the
-    report itself, rather than a fabricated 0.
+    quota/failure tallies and facts fetched/cached are not retained past the
+    run that produced them. `build_view(..., fresh=False)` renders those as
+    "not recorded" in the report itself, rather than a fabricated 0.
+
+    Only a v2 run can be re-rendered: see the pre-v2 guard below.
     """
     try:
         ctx = build_context()
@@ -343,17 +190,14 @@ def report(run_id: int = typer.Argument(..., help="A previous run's id")) -> Non
     if row is None:
         typer.echo(f"No run with id {run_id}", err=True)
         raise typer.Exit(code=1)
+    if ctx.runs.schema_version(run_id) < 2:
+        # A bottlenecks-era run has no findings or stages. Laying it out in
+        # the new report would show every company as having found nothing,
+        # which is not what that run found; its own saved report still is.
+        typer.echo(f"Run {run_id} is a pre-v2 run; see its saved HTML report.", err=True)
+        raise typer.Exit(code=1)
 
-    bottlenecks = ctx.bottlenecks.for_run(run_id)
-    quotes_accepted = sum(
-        len(ctx.evidence.for_company(run_id, b.company_id)) for b in bottlenecks)
-    summary = RunSummary(
-        run_id=run_id, role_title=row["role_title"], sector=row["sector"],
-        companies=len(bottlenecks),
-        evidenced=sum(1 for b in bottlenecks if b.passed),
-        no_findings=sum(1 for b in bottlenecks if not b.passed),
-        quotes_accepted=quotes_accepted,
-    )
+    summary = _summary_from_storage(ctx, run_id, row["role_title"], row["sector"])
     path = write_report(build_view(ctx, summary, fresh=False), ctx.config.paths.reports)
     typer.echo(f"Report: {path}")
 

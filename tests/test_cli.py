@@ -100,3 +100,54 @@ def test_dry_run_guards_remaining_credits_and_reports_incomplete_estimate(monkey
     assert result.exit_code != 0
     assert "could not be checked" in result.output.lower()
     assert "companies matched" in result.output.lower()
+
+
+def _fake_adapters(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setenv("HUNTER_API_KEY", "test")
+    monkeypatch.setenv("OUTREACH_FAKE_ADAPTERS", "1")
+
+
+def _stored_run(tmp_path, schema_version: int) -> int:
+    """A finished run row in the test's scratch database, as `run` leaves it."""
+    from datetime import datetime
+    from pathlib import Path
+
+    from outreach.store.db import connect
+    from outreach.store.runs import RunRepo
+
+    conn = connect(tmp_path / Path("data/pipeline.db"))
+    runs = RunRepo(conn)
+    run_id = runs.create("Backend Engineer", "fintech", "US", (1, 2000), datetime(2026, 9, 21))
+    runs.finish(run_id, datetime(2026, 9, 21, 1))
+    conn.execute("UPDATE runs SET schema_version = ? WHERE id = ?", (schema_version, run_id))
+    conn.commit()
+    conn.close()
+    return run_id
+
+
+def test_report_command_refuses_a_pre_v2_run(monkeypatch, tmp_path):
+    """A bottlenecks-era run has no findings or stages to lay out; rendering
+    it as a run where nothing was found would misstate what it found."""
+    _fake_adapters(monkeypatch)
+    run_id = _stored_run(tmp_path, schema_version=1)
+    result = runner.invoke(app, ["report", str(run_id)])
+    assert result.exit_code == 1
+    assert f"Run {run_id} is a pre-v2 run; see its saved HTML report." in result.output
+    assert not (tmp_path / "reports").exists()
+
+
+def test_report_command_rerenders_a_v2_run(monkeypatch, tmp_path):
+    _fake_adapters(monkeypatch)
+    run_id = _stored_run(tmp_path, schema_version=2)
+    result = runner.invoke(app, ["report", str(run_id)])
+    assert result.exit_code == 0, result.output
+    [path] = (tmp_path / "reports").glob("*.html")
+    assert "not recorded" in path.read_text(encoding="utf-8")
+
+
+def test_report_command_rejects_an_unknown_run(monkeypatch):
+    _fake_adapters(monkeypatch)
+    result = runner.invoke(app, ["report", "99"])
+    assert result.exit_code == 1
+    assert "No run with id 99" in result.output

@@ -159,6 +159,16 @@ def _round_label(r: FundingRound) -> str:
     return f"{base} ({r.announced:%Y-%m})" if r.announced else base
 
 
+def latest_round_label(rounds: Sequence[FundingRound]) -> str | None:
+    """The latest round as the classifier names it in a stage reason, or None.
+
+    Public so the report labels a company's round exactly the way its stage
+    reasons do, rather than a second formatting that could drift.
+    """
+    latest = _latest_round(rounds)
+    return _round_label(latest) if latest is not None else None
+
+
 def _stage_from_round(kind: str) -> Stage | None:
     m = _SERIES_KIND.match(kind)
     if m:
