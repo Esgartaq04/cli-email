@@ -1,8 +1,9 @@
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime
 
 import pytest
 
+from outreach.net.fetcher import FetchOutcome
 from outreach.pipeline.runner import run_pipeline
 from outreach.types import PersonRef, SourceClass
 from tests.pipeline.factories import build_context, company_id
@@ -100,13 +101,25 @@ def test_only_current_state_surfaces_are_dated_with_the_fetch_date():
     ctx = build_context()
     summary = run_pipeline(ctx, "Backend Engineer", "fintech")
 
-    good = ctx.companies.upsert("good.example", "Good Co", None, None)
+    good = company_id(ctx, "good.example")
+    dates: dict[SourceClass, set] = {}
+    for doc in ctx.documents.for_company(good):
+        dates.setdefault(doc.source_class, set()).add(doc.published_at)
+
+    # Current state: what the page says is true today.
+    assert dates[SourceClass.CAREERS_PAGE] == {ctx.today}
+    assert dates[SourceClass.ABOUT] == {ctx.today}
+    # Dated archives: their own dates, or none -- never the fetch date.
+    assert dates[SourceClass.ENG_BLOG] == {None}  # the index states no date
+    assert dates[SourceClass.CHANGELOG] == {date(2026, 9, 12), date(2026, 8, 1)}
+    assert dates[SourceClass.PRESS] == {date(2026, 9, 2)}
+    assert dates[SourceClass.GITHUB] == {date(2026, 9, 15)}
+
+    # The evidence carries its document's date.
     by_class = {i.source_class: i.published_at
                 for i in ctx.evidence.for_company(summary.run_id, good)}
-
     assert by_class[SourceClass.CAREERS_PAGE] == ctx.today
-    assert by_class[SourceClass.ENG_BLOG] is None
-    assert by_class[SourceClass.CHANGELOG] is None
+    assert by_class[SourceClass.CHANGELOG] == date(2026, 9, 12)
 
 
 def test_a_failed_company_gets_no_fabricated_verdict():
@@ -133,16 +146,45 @@ def test_a_malformed_posting_does_not_cost_the_other_companies():
 
 
 def test_the_skipped_github_surface_is_recorded_not_invisible():
-    """V1 never resolves a GitHub org, so the surface is always left out of
+    """A company whose homepage links no GitHub org has no GitHub target in
     `surface_targets`. That gap must show up in the coverage log as a
     recorded skip, not vanish as if GitHub were never even considered."""
     ctx = build_context()
     summary = run_pipeline(ctx, "Backend Engineer", "fintech")
-    good = ctx.companies.upsert("good.example", "Good Co", None, None)
-    attempts = ctx.fetch_attempts.for_company(summary.run_id, good)
+    thin = company_id(ctx, "thin.example")  # its homepage links no GitHub org
+    attempts = ctx.fetch_attempts.for_company(summary.run_id, thin)
     github_attempts = [a for a in attempts if a.source_class == SourceClass.GITHUB]
     assert len(github_attempts) == 1
     assert github_attempts[0].outcome == "skipped_no_github_org"
+
+    # good.example's org is known, so its repos are fetched, not skipped.
+    good = company_id(ctx, "good.example")
+    assert [a.outcome for a in ctx.fetch_attempts.for_company(summary.run_id, good)
+            if a.source_class == SourceClass.GITHUB] == ["ok"]
+
+
+def test_a_github_fetch_does_not_confirm_a_guessed_domain():
+    """api.github.com answering says nothing about whether the company's own
+    domain is real, exactly like a job-board-hosted posting."""
+    ctx = build_context(include_unconfirmed_domain=True)
+    # An org remembered from an earlier run, when the homepage still answered.
+    ghost = ctx.companies.upsert("ghost.example", "Ghost Co", None, None)
+    ctx.companies.set_github_org(ghost, "ghostco")
+    real = ctx.fetcher.get
+
+    def get(url):
+        if url.startswith("https://api.github.com/orgs/ghostco/repos"):
+            return FetchOutcome(url, 200, "[]", "ok")
+        return real(url)
+
+    ctx.fetcher.get = get
+    summary = run_pipeline(ctx, "Backend Engineer", "fintech")
+
+    assert [a.outcome for a in ctx.fetch_attempts.for_company(summary.run_id, ghost)
+            if a.source_class is SourceClass.GITHUB] == ["ok"]
+    assert ctx.runs.stage_status(summary.run_id, ghost, "contacts") == (
+        "skipped_domain_unconfirmed")
+    assert "ghost.example" not in ctx.contact_provider.find_calls
 
 
 def test_a_company_whose_domain_was_never_confirmed_is_not_enriched():
@@ -254,12 +296,12 @@ def test_resuming_after_a_crash_does_not_duplicate_evidence():
     assert len(rows) == 3  # not 5
     assert len({r.quote for r in rows}) == 3
     # 1 homepage fetch from the enrich stage (kept across the evidence
-    # stage's re-derivation, since it is what confirms the domain) + 6 real
-    # surfaces (careers, blog, changelog, press, about, dev docs) + 1
-    # job-posting read (the fixture's posting URL is unfetchable) + 1 synthetic
-    # "skipped_no_github_org" record; not doubled by the interrupted partial
-    # attempt.
-    assert len(ctx.fetch_attempts.for_company(run_id, good)) == 9
+    # stage's re-derivation, since it is what confirms the domain) + careers,
+    # blog, changelog and about (1 each) + press (/press 404, the /news index,
+    # its one post) + dev docs (/docs 404, /developers) + the GitHub repos
+    # call + 1 job-posting read (the fixture's posting URL is unfetchable);
+    # not doubled by the interrupted partial attempt.
+    assert len(ctx.fetch_attempts.for_company(run_id, good)) == 12
     assert summary.quotes_accepted == 3
 
 

@@ -6,11 +6,11 @@ import httpx
 
 from outreach.llm.base import RawClaim
 from outreach.llm.fake import FakeLLM
-from outreach.net.fetcher import Fetcher
+from outreach.net.fetcher import FetchOutcome, Fetcher
 from outreach.pipeline.runner import run_pipeline
 from outreach.sources.jobboards.fake import FakeJobBoardSource
 from outreach.types import PostingRef, SourceClass
-from tests.pipeline.factories import TODAY, build_context
+from tests.pipeline.factories import TODAY, build_context, company_id
 
 THEME = "scaling-bottlenecks"
 
@@ -159,3 +159,107 @@ def test_a_job_posting_hosted_elsewhere_does_not_confirm_a_guessed_domain():
     ctx = _ctx(site={}, posting_url="https://boards.example/jobs/1")
     summary = run_pipeline(ctx, "Backend Engineer", "fintech")
     assert summary.skipped_domain_unconfirmed == 1
+
+
+# --- research surfaces, against the shared good.example fixture -------------
+
+def _good(ctx, source_class):
+    return [d for d in ctx.documents.for_company(company_id(ctx, "good.example"))
+            if d.source_class is source_class]
+
+
+def _good_attempts(ctx, run_id, source_class):
+    return [a for a in ctx.fetch_attempts.for_company(run_id, company_id(ctx, "good.example"))
+            if a.source_class is source_class]
+
+
+def test_each_changelog_entry_is_its_own_dated_document():
+    ctx = build_context()
+    s = run_pipeline(ctx, "Backend Engineer", "fintech")
+    docs = _good(ctx, SourceClass.CHANGELOG)
+    assert [(d.url, d.published_at) for d in docs] == [
+        ("https://good.example/changelog#2026-09-12", date(2026, 9, 12)),
+        ("https://good.example/changelog#2026-08-01", date(2026, 8, 1)),
+    ]
+    # One fetch, recorded once, with both entries counted against it.
+    assert [(a.url, a.outcome, a.document_count)
+            for a in _good_attempts(ctx, s.run_id, SourceClass.CHANGELOG)] == [
+        ("https://good.example/changelog", "ok", 2)]
+
+
+def test_the_changelog_entry_budget_keeps_the_newest():
+    ctx = build_context()
+    ctx = replace(ctx, config=replace(ctx.config, discovery=replace(
+        ctx.config.discovery, max_changelog_entries=1)))
+    run_pipeline(ctx, "Backend Engineer", "fintech")
+    assert [d.url for d in _good(ctx, SourceClass.CHANGELOG)] == [
+        "https://good.example/changelog#2026-09-12"]
+
+
+def test_a_changelog_with_no_dated_entries_is_read_whole_and_undated():
+    ctx = build_context()
+    real = ctx.fetcher.get
+
+    def get(url):
+        if url == "https://good.example/changelog":
+            return FetchOutcome(url, 200, "<html><body><p>recon-worker: increase lock "
+                                "timeout to 900s (temporary)</p></body></html>", "ok")
+        return real(url)
+
+    ctx.fetcher.get = get
+    run_pipeline(ctx, "Backend Engineer", "fintech")
+    assert [(d.url, d.published_at) for d in _good(ctx, SourceClass.CHANGELOG)] == [
+        ("https://good.example/changelog", None)]
+
+
+def test_press_falls_back_to_news_and_reads_dated_posts():
+    ctx = build_context()
+    s = run_pipeline(ctx, "Backend Engineer", "fintech")
+    assert [(a.url, a.outcome) for a in _good_attempts(ctx, s.run_id, SourceClass.PRESS)] == [
+        ("https://good.example/press", "http_error"),
+        ("https://good.example/news", "ok"),
+        ("https://good.example/news/seed-round", "ok"),
+    ]
+    assert [(d.url, d.published_at) for d in _good(ctx, SourceClass.PRESS)] == [
+        ("https://good.example/news/seed-round", date(2026, 9, 2))]
+
+
+def test_a_surface_that_answers_at_its_primary_path_tries_no_alternate():
+    ctx = build_context()
+    s = run_pipeline(ctx, "Backend Engineer", "fintech")
+    thin = company_id(ctx, "thin.example")  # thin.example answers on every path
+    press = [a.url for a in ctx.fetch_attempts.for_company(s.run_id, thin)
+             if a.source_class is SourceClass.PRESS]
+    assert press == ["https://thin.example/press"]
+
+
+def test_dev_docs_are_recorded_for_hooks_but_never_extracted():
+    ctx = build_context()
+    s = run_pipeline(ctx, "Backend Engineer", "fintech")
+    assert [(a.url, a.outcome, a.document_count)
+            for a in _good_attempts(ctx, s.run_id, SourceClass.DEV_DOCS)] == [
+        ("https://good.example/docs", "http_error", 0),
+        ("https://good.example/developers", "ok", 0),
+    ]
+    assert _good(ctx, SourceClass.DEV_DOCS) == []
+
+
+def test_recent_github_repos_become_dated_first_party_evidence():
+    ctx = build_context()
+    s = run_pipeline(ctx, "Backend Engineer", "fintech")
+    docs = _good(ctx, SourceClass.GITHUB)
+    assert [(d.url, d.published_at, d.publisher_domain) for d in docs] == [
+        ("https://github.com/goodco/recon-worker", date(2026, 9, 15), "good.example")]
+    assert [(a.url, a.outcome, a.document_count)
+            for a in _good_attempts(ctx, s.run_id, SourceClass.GITHUB)] == [
+        ("https://api.github.com/orgs/goodco/repos?sort=pushed&per_page=20", "ok", 1)]
+    assert ctx.cache.read(docs[0].content_hash) == (
+        "recon-worker: Streaming ledger reconciliation")
+
+
+def test_the_status_page_is_no_longer_fetched():
+    ctx = build_context()
+    s = run_pipeline(ctx, "Backend Engineer", "fintech")
+    for cid in (company_id(ctx, "good.example"), company_id(ctx, "thin.example")):
+        assert not any(a.url.startswith("https://status.")
+                       for a in ctx.fetch_attempts.for_company(s.run_id, cid))

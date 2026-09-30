@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 from datetime import date
 from pathlib import Path
@@ -24,20 +25,40 @@ from outreach.types import CompanyFacts, PersonRef, PostingRef
 
 TODAY = date(2026, 9, 21)
 
-# The careers page is the one CURRENT-STATE surface good.example serves. It
-# exists because evidence dating is class-dependent: an eng blog post and a
-# changelog entry carry no parsed date, so they are never "fresh" and a
-# company evidenced only by them fails the gate's recency rule. A company
-# that is actively hiring has a careers page, and its fetch date is an
-# honest publication date, so this is what makes good.example's cluster
-# both independent AND current.
+# The careers page is a CURRENT-STATE surface. It exists because evidence
+# dating is class-dependent: good.example's blog index states no date, so it
+# is never "fresh" and a company evidenced only by it fails the gate's
+# recency rule. A company that is actively hiring has a careers page, and its
+# fetch date is an honest publication date, so this is what makes
+# good.example's cluster both independent AND current.
 GOOD_CAREERS = ("<html><body><p>You will own the reconciliation pipeline that "
                 "currently runs overnight and is the team's tightest "
                 "constraint.</p></body></html>")
 GOOD_BLOG = ("<html><body><p>Our nightly reconciliation job now regularly "
              "exceeds its 6-hour window.</p></body></html>")
-GOOD_CHANGELOG = ("<html><body><p>recon-worker: increase lock timeout to 900s "
-                  "(temporary)</p></body></html>")
+# Two dated releases: each becomes its own document, dated from its heading.
+# The quote the fake LLM offers lives in the newer one.
+GOOD_CHANGELOG = ("<html><body>"
+                  "<h2>2026-09-12</h2><p>recon-worker: increase lock timeout to 900s "
+                  "(temporary)</p>"
+                  "<h2>August 1, 2026</h2><p>Exports now stream instead of "
+                  "buffering.</p></body></html>")
+# good.example has no /press: its press index lives at /news, one dated post.
+GOOD_NEWS = ('<html><body><a href="/news/seed-round">We raised a seed round</a>'
+             "</body></html>")
+GOOD_NEWS_POST = ('<html><head><script type="application/ld+json">'
+                  '{"datePublished":"2026-09-02"}</script></head><body>'
+                  "<p>Good Co raises a seed round to build real-time "
+                  "reconciliation.</p></body></html>")
+GOOD_ABOUT = ("<html><body><p>Good Co builds reconciliation software for "
+              "finance teams.</p></body></html>")
+# Dev docs are hooks, never evidence: /docs is absent, /developers answers.
+GOOD_DEV_DOCS = "<html><body><p>API reference: POST /v1/reconciliations</p></body></html>"
+GOOD_REPOS = json.dumps([{
+    "name": "recon-worker", "description": "Streaming ledger reconciliation",
+    "html_url": "https://github.com/goodco/recon-worker",
+    "pushed_at": "2026-09-15T12:00:00Z", "fork": False, "archived": False,
+}])
 THIN_PAGE = "<html><body><p>We build payments software.</p></body></html>"
 # The homepage is what the enrich stage fetches to confirm a domain and to
 # find the GitHub org it links to. Never ingested, so it carries no quote.
@@ -75,6 +96,16 @@ def _transport(explode_on_domain: str | None):
             return httpx.Response(200, text=GOOD_BLOG)
         if "good.example/changelog" in url:
             return httpx.Response(200, text=GOOD_CHANGELOG)
+        if url == "https://good.example/news":
+            return httpx.Response(200, text=GOOD_NEWS)
+        if url == "https://good.example/news/seed-round":
+            return httpx.Response(200, text=GOOD_NEWS_POST)
+        if url == "https://good.example/about":
+            return httpx.Response(200, text=GOOD_ABOUT)
+        if url == "https://good.example/developers":
+            return httpx.Response(200, text=GOOD_DEV_DOCS)
+        if url.startswith("https://api.github.com/orgs/goodco/repos"):
+            return httpx.Response(200, text=GOOD_REPOS)
         if "thin.example" in url:
             return httpx.Response(200, text=THIN_PAGE)
         return httpx.Response(404)

@@ -279,16 +279,29 @@ class FetchAttemptRepo:
         )
         self.conn.commit()
 
-    def clear_for_company(self, run_id: int, company_id: int) -> int:
+    def clear_for_company(self, run_id: int, company_id: int,
+                          only: frozenset[SourceClass] | None = None,
+                          keep: frozenset[SourceClass] | None = None) -> int:
         """Drop this run's fetch attempts for one company; return rows removed.
 
         The companion to `EvidenceRepo.clear_for_company`: a re-run refetches
         every surface, so the old attempt rows would otherwise accumulate and
         the diagnostics would show one surface tried twice as often as it was.
+
+        Two stages write this log -- enrich (the homepage) and evidence (every
+        surface) -- and each re-derives only its own share on a resume, so
+        `only` limits the delete to some classes and `keep` spares some. It is
+        one DELETE: reading the survivors out and writing them back would lose
+        them to a crash in between, and hand them new ids.
         """
-        cur = self.conn.execute(
-            "DELETE FROM fetch_attempts WHERE run_id = ? AND company_id = ?",
-            (run_id, company_id))
+        sql = "DELETE FROM fetch_attempts WHERE run_id = ? AND company_id = ?"
+        params: list[object] = [run_id, company_id]
+        for classes, op in ((only, "IN"), (keep, "NOT IN")):
+            if classes is not None:
+                marks = ", ".join("?" * len(classes))
+                sql += f" AND source_class {op} ({marks})"
+                params.extend(sorted(c.value for c in classes))
+        cur = self.conn.execute(sql, params)
         self.conn.commit()
         return int(cur.rowcount)
 

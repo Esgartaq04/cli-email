@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Callable, Sequence
+from datetime import date, datetime
+from typing import Sequence
 
 from outreach.contacts.quota import CreditBudget
 from outreach.core.clustering import cluster_by_theme
@@ -12,13 +12,15 @@ from outreach.core.gate import GateVerdict, evaluate
 from outreach.core.ranking import rank_contacts
 from outreach.core.stage import exceeds_cap
 from outreach.core.workmode import posting_matches
+from outreach.extraction.changelog import split_changelog
 from outreach.extraction.extract import extract_and_persist
 from outreach.extraction.htmltext import html_to_text
 from outreach.extraction.pubdate import parse_published_date
+from outreach.net.fetcher import FetchOutcome
 from outreach.pipeline.context import RunContext
 from outreach.sources.base import SurfaceTarget
 from outreach.sources.surfaces.blog import find_blog_links
-from outreach.sources.surfaces.github import find_github_org
+from outreach.sources.surfaces.github import find_github_org, parse_repos
 from outreach.sources.surfaces.standard import surface_targets
 from outreach.types import (ALL_WORK_MODES, Company, EvidenceItem, FetchAttempt, Finding,
                             PersonRef, PostingRef, SourceClass, SourceDocument,
@@ -32,17 +34,23 @@ STAGES = ("discover", "enrich", "evidence", "contacts", "synthesize")
 
 # Surfaces that describe a company's CURRENT state rather than a dated
 # archive. For these the fetch date is an honest publication date: a
-# careers page or a status page says what is true today. An eng blog post,
-# a changelog entry, a GitHub event or a news article are dated artifacts,
-# and V1 parses no date out of them — so their `published_at` stays None
-# and the gate treats them as not-fresh. That fails toward the
-# no-bottleneck branch, which is the safe direction: we would rather stay
-# silent about a company than claim stale pain is current.
+# careers page or an about page says what is true today. A blog or press
+# post, a changelog entry and a GitHub repo are dated artifacts and carry
+# their own date -- from the post's markup, the entry's heading, the repo's
+# last push. Where none can be read, `published_at` stays None and the gate
+# treats the evidence as not fresh. That fails toward the no-bottleneck
+# branch, which is the safe direction: we would rather stay silent about a
+# company than claim stale pain is current.
 CURRENT_STATE_CLASSES = frozenset({
     SourceClass.CAREERS_PAGE,
     SourceClass.JOB_POSTING,
-    SourceClass.STATUS_PAGE,
+    SourceClass.ABOUT,
 })
+
+# Fetches that reach a host other than the company's own, so answering says
+# nothing about whether a guessed domain is real: a job posting usually lives
+# on the board, and GitHub repos live on api.github.com.
+_OFF_DOMAIN_CLASSES = frozenset({SourceClass.JOB_POSTING, SourceClass.GITHUB})
 
 
 @dataclass
@@ -186,8 +194,8 @@ def run_pipeline(
             # being re-run, and is what confirms the domain for contacts --
             # so it is kept.
             ctx.evidence.clear_for_company(run_id, company_id)
-            _clear_attempts(ctx, run_id, company_id,
-                            keep=lambda a: a.source_class is SourceClass.HOMEPAGE)
+            ctx.fetch_attempts.clear_for_company(
+                run_id, company_id, keep=frozenset({SourceClass.HOMEPAGE}))
             result = _profile_and_extract(ctx, run_id, company_id, summary,
                                           postings_by_company.get(company_id, ()))
             joined = "; ".join(result.errors)
@@ -226,9 +234,10 @@ def run_pipeline(
     pending = []
     for company_id in still_pending:
         # A job-posting page is usually hosted by the job board, not the
-        # company, so reaching one says nothing about the guessed domain.
-        # The enrich stage's homepage fetch does count: it is the domain.
-        confirmed = any(a.outcome == "ok" and a.source_class is not SourceClass.JOB_POSTING
+        # company, and GitHub repos are read from api.github.com, so reaching
+        # either says nothing about the guessed domain. The enrich stage's
+        # homepage fetch does count: it is the domain.
+        confirmed = any(a.outcome == "ok" and a.source_class not in _OFF_DOMAIN_CLASSES
                         for a in ctx.fetch_attempts.for_company(run_id, company_id))
         if confirmed:
             pending.append(company_id)
@@ -329,21 +338,6 @@ def _group_by_domain(
     return grouped
 
 
-def _clear_attempts(ctx: RunContext, run_id: int, company_id: int,
-                    keep: Callable[[FetchAttempt], bool]) -> None:
-    """Drop this run's fetch attempts for one company, except those `keep` holds.
-
-    Two stages write this company's fetch log -- enrich (the homepage) and
-    evidence (every surface) -- and each re-derives only its own share on a
-    resume. Clearing the whole log would erase the other stage's record,
-    which for the homepage is the proof the domain is real.
-    """
-    kept = [a for a in ctx.fetch_attempts.for_company(run_id, company_id) if keep(a)]
-    ctx.fetch_attempts.clear_for_company(run_id, company_id)
-    for attempt in kept:
-        ctx.fetch_attempts.insert(run_id, attempt)
-
-
 def _enrich(ctx: RunContext, run_id: int, company_id: int, budget: CreditBudget,
             summary: RunSummary) -> tuple[str, str | None]:
     """Confirm the domain, find its GitHub org, and learn the company's size.
@@ -353,8 +347,10 @@ def _enrich(ctx: RunContext, run_id: int, company_id: int, budget: CreditBudget,
     learn is unknown, and unknown never drops a company.
     """
     company = ctx.companies.get(company_id)
-    _clear_attempts(ctx, run_id, company_id,
-                    keep=lambda a: a.source_class is not SourceClass.HOMEPAGE)
+    # Only the homepage row is this stage's to re-derive; the evidence
+    # stage's rows for the same company stay (see `clear_for_company`).
+    ctx.fetch_attempts.clear_for_company(
+        run_id, company_id, only=frozenset({SourceClass.HOMEPAGE}))
     homepage = ctx.fetcher.get(f"https://{company.canonical_domain}/")
     _record_attempt(ctx, run_id, company_id, SourceClass.HOMEPAGE, homepage, 0)
 
@@ -366,7 +362,12 @@ def _enrich(ctx: RunContext, run_id: int, company_id: int, budget: CreditBudget,
         # headcount. Research still runs; it is how the report shows why.
         status = "skipped_domain_unconfirmed"
     else:
-        ctx.companies.set_github_org(company_id, find_github_org(homepage.body or ""))
+        # A homepage that links no org is not proof the org is gone: a
+        # JS-rendered page links nothing at all. Only a found org is written,
+        # so one we learned earlier survives.
+        github_org = find_github_org(homepage.body or "")
+        if github_org:
+            ctx.companies.set_github_org(company_id, github_org)
         status, error = _company_facts(ctx, company, budget, summary)
 
     company = ctx.companies.get(company_id)
@@ -419,7 +420,8 @@ def _profile_and_extract(ctx: RunContext, run_id: int, company_id: int,
     company = ctx.companies.get(company_id)
     completed = 0
     errors: list[str] = []
-    github_org = None  # V1 never resolves one; see the skip record below.
+    # Learned from the homepage by the enrich stage; see the skip record below.
+    github_org = company.github_org
     for target in surface_targets(company.canonical_domain, github_org=github_org):
         try:
             _sweep_surface(ctx, run_id, company_id, company.canonical_domain,
@@ -442,10 +444,10 @@ def _profile_and_extract(ctx: RunContext, run_id: int, company_id: int,
 
     if github_org is None:
         # `surface_targets` silently leaves GitHub out of the list whenever
-        # there's no org to check -- which is always, in V1. Recording that
-        # as a FetchAttempt (rather than nothing at all) makes the gap show
-        # up in the report's coverage log instead of looking like GitHub
-        # was never even considered.
+        # the homepage linked no org. Recording that as a FetchAttempt
+        # (rather than nothing at all) makes the gap show up in the report's
+        # coverage log instead of looking like GitHub was never even
+        # considered.
         try:
             ctx.fetch_attempts.insert(run_id, FetchAttempt(
                 company_id, SourceClass.GITHUB, "", "skipped_no_github_org", None, 0))
@@ -457,25 +459,58 @@ def _profile_and_extract(ctx: RunContext, run_id: int, company_id: int,
 
 def _sweep_surface(ctx: RunContext, run_id: int, company_id: int, domain: str,
                    target: SurfaceTarget, summary: RunSummary) -> None:
-    if target.source_class is SourceClass.ENG_BLOG:
-        _sweep_blog(ctx, run_id, company_id, domain, target, summary)
+    cls = target.source_class
+    page = _fetch_surface(ctx, run_id, company_id, target)
+    if page is None:
         return
-    outcome = ctx.fetcher.get(target.url)
-    if outcome.outcome != "ok" or not outcome.body:
-        _record_attempt(ctx, run_id, company_id, target.source_class, outcome, 0)
-        return
-    _ingest(ctx, run_id, company_id, domain, target.source_class, outcome, summary)
+    discovery = ctx.config.discovery
+    if cls is SourceClass.ENG_BLOG:
+        _sweep_blog(ctx, run_id, company_id, domain, cls, page, summary,
+                    limit=discovery.max_blog_posts)
+    elif cls is SourceClass.PRESS:
+        # A press page is a blog in all but name: an index of dated posts.
+        _sweep_blog(ctx, run_id, company_id, domain, cls, page, summary,
+                    limit=discovery.max_press_posts)
+    elif cls is SourceClass.CHANGELOG:
+        _sweep_changelog(ctx, run_id, company_id, domain, page, summary)
+    elif cls is SourceClass.DEV_DOCS:
+        # Recorded, never extracted: API reference says what a company ships
+        # to developers -- a hook for the email -- but nothing about where it
+        # hurts, and it would only feed the LLM pages of endpoint tables.
+        _record_attempt(ctx, run_id, company_id, cls, page, 0)
+    elif cls is SourceClass.GITHUB:
+        _sweep_github(ctx, run_id, company_id, domain, page, summary)
+    else:
+        _ingest(ctx, run_id, company_id, domain, cls, page, summary)
+
+
+def _fetch_surface(ctx: RunContext, run_id: int, company_id: int,
+                   target: SurfaceTarget) -> FetchOutcome | None:
+    """The target's first URL that answers with a page, or None if none does.
+
+    Alternates are tried in order only after the primary misses (a site's
+    press page may live at /news). Every miss is recorded as it happens; the
+    page that answers is returned unrecorded, since how many documents it
+    yields is known only once it has been read.
+    """
+    for url in (target.url, *target.alternates):
+        page = ctx.fetcher.get(url)
+        if page.outcome == "ok" and page.body:
+            return page
+        _record_attempt(ctx, run_id, company_id, target.source_class, page, 0)
+    return None
 
 
 def _record_attempt(ctx: RunContext, run_id: int, company_id: int,
-                    source_class: SourceClass, outcome, documents: int) -> None:
+                    source_class: SourceClass, outcome: FetchOutcome,
+                    documents: int) -> None:
     ctx.fetch_attempts.insert(run_id, FetchAttempt(
         company_id, source_class, outcome.url, outcome.outcome, outcome.status,
         documents))
 
 
 def _ingest(ctx: RunContext, run_id: int, company_id: int, domain: str,
-            source_class: SourceClass, outcome, summary: RunSummary,
+            source_class: SourceClass, outcome: FetchOutcome, summary: RunSummary,
             page_dated: bool = False) -> None:
     """Store one fetched page and extract its claims.
 
@@ -490,16 +525,31 @@ def _ingest(ctx: RunContext, run_id: int, company_id: int, domain: str,
     # user pastes into an email. `outcome.body` is raw HTTP response text --
     # extract plain prose from it before either side ever looks at it.
     text = html_to_text(outcome.body)
-    content_hash = ctx.cache.store(text.encode("utf-8"))
     if page_dated:
         published_at = parse_published_date(outcome.body)
     else:
         published_at = ctx.today if source_class in CURRENT_STATE_CLASSES else None
-    doc = SourceDocument(None, company_id, outcome.url, source_class,
-                         domain, published_at, datetime.now(),
-                         outcome.status or 200, content_hash)
-    doc_id = ctx.documents.insert(doc)
+    # Recorded before extraction, as it always was: a page that answered
+    # confirms the domain even if the LLM call on it then fails.
     _record_attempt(ctx, run_id, company_id, source_class, outcome, 1)
+    _ingest_text(ctx, run_id, company_id, domain, source_class, outcome.url,
+                 outcome.status, text, published_at, summary)
+
+
+def _ingest_text(ctx: RunContext, run_id: int, company_id: int, domain: str,
+                 source_class: SourceClass, url: str, status: int | None,
+                 text: str, published_at: date | None, summary: RunSummary) -> None:
+    """Store one document's plain text and extract its claims.
+
+    `text` is exactly what the LLM reads and what the substring guard checks
+    quotes against. The caller records the fetch attempt: one fetch can
+    yield several documents (changelog entries, repos).
+    """
+    content_hash = ctx.cache.store(text.encode("utf-8"))
+    doc = SourceDocument(None, company_id, url, source_class,
+                         domain, published_at, datetime.now(),
+                         status or 200, content_hash)
+    doc_id = ctx.documents.insert(doc)
 
     result = extract_and_persist(run_id, doc, text, ctx.llm,
                                  ctx.evidence, document_id=doc_id)
@@ -507,23 +557,62 @@ def _ingest(ctx: RunContext, run_id: int, company_id: int, domain: str,
     summary.quotes_rejected += result.rejected
 
 
+def _sweep_changelog(ctx: RunContext, run_id: int, company_id: int, domain: str,
+                     page: FetchOutcome, summary: RunSummary) -> None:
+    """Read each dated release as its own document, newest first.
+
+    A changelog page spans years; read whole, its one date would be the
+    fetch date or none, and a two-year-old workaround would sit beside last
+    week's fix. Split into entries, each claim carries the date of the
+    release that made it. A page with no dated headings is read whole and
+    undated, as before, so an unusual layout is not lost.
+    """
+    entries = split_changelog(page.body or "")
+    if not entries:
+        _ingest(ctx, run_id, company_id, domain, SourceClass.CHANGELOG, page, summary)
+        return
+    entries = entries[:ctx.config.discovery.max_changelog_entries]
+    _record_attempt(ctx, run_id, company_id, SourceClass.CHANGELOG, page, len(entries))
+    for entry in entries:
+        # Two entries on one day share this url; their text differs, and
+        # documents are keyed on (url, content_hash), so both are kept.
+        _ingest_text(ctx, run_id, company_id, domain, SourceClass.CHANGELOG,
+                     f"{page.url}#{entry.published_at.isoformat()}", page.status,
+                     f"{entry.heading}\n{entry.text}", entry.published_at, summary)
+
+
+def _sweep_github(ctx: RunContext, run_id: int, company_id: int, domain: str,
+                  page: FetchOutcome, summary: RunSummary) -> None:
+    """Read the org's recently pushed repos, each dated by its last push.
+
+    The publisher is still the company: the org was found on its own
+    homepage, so a repo there is first-party evidence of what it is building.
+    """
+    repos = parse_repos(page.body or "", ctx.today, ctx.config.gate.recency_days,
+                        ctx.config.discovery.max_github_repos)
+    _record_attempt(ctx, run_id, company_id, SourceClass.GITHUB, page, len(repos))
+    for repo in repos:
+        _ingest_text(ctx, run_id, company_id, domain, SourceClass.GITHUB, repo.url,
+                     page.status, f"{repo.name}: {repo.description}", repo.pushed_at,
+                     summary)
+
+
 def _sweep_blog(ctx: RunContext, run_id: int, company_id: int, domain: str,
-                target: SurfaceTarget, summary: RunSummary) -> None:
-    """Read individual engineering posts, not the blog's front page.
+                cls: SourceClass, index: FetchOutcome, summary: RunSummary,
+                limit: int) -> None:
+    """Read individual posts, not the index's front page.
 
     A blog index is a wall of teasers with no dates, and mixes marketing in
     with engineering writing. The posts carry the substance and their own
     publication dates, and most blogs have an engineering section that
     holds the ones worth reading. If no post links can be found the index
     itself is read, as before, so a blog with unusual markup is not lost.
-    """
-    cls = target.source_class
-    index = ctx.fetcher.get(target.url)
-    if index.outcome != "ok" or not index.body:
-        _record_attempt(ctx, run_id, company_id, cls, index, 0)
-        return
+    Press pages are read the same way, at most `limit` posts either way.
 
-    links = find_blog_links(index.body, target.url)
+    `index` is the page that answered, which may be an alternate: post
+    links are resolved against it, so /news finds its /news/... posts.
+    """
+    links = find_blog_links(index.body or "", index.url)
     candidates = links.posts
     discovery = [index]
     if links.engineering_index:
@@ -545,10 +634,9 @@ def _sweep_blog(ctx: RunContext, run_id: int, company_id: int, domain: str,
 
     # Listed posts can 404 (unpublished cards, moved URLs), so keep going past
     # failures, but never spend more than twice the budget doing it.
-    wanted = ctx.config.discovery.max_blog_posts
     read = tried = 0
     for url in candidates:
-        if read >= wanted or tried >= 2 * wanted:
+        if read >= limit or tried >= 2 * limit:
             break
         tried += 1
         post = ctx.fetcher.get(url)

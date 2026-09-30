@@ -1,4 +1,5 @@
 """The enrich stage and the work-mode filter at discovery."""
+from outreach.net.fetcher import FetchOutcome
 from outreach.pipeline.runner import run_pipeline
 from outreach.sources.jobboards.multi import MultiBoardSource
 from outreach.types import CompanyFacts
@@ -71,6 +72,23 @@ def test_the_homepage_github_link_is_remembered():
     ctx = build_context()
     run_pipeline(ctx, "Backend Engineer", "fintech")
     assert ctx.companies.get(company_id(ctx, "good.example")).github_org == "goodco"
+
+
+def test_a_homepage_that_stops_linking_github_does_not_forget_the_org():
+    """A JS-rendered homepage links nothing; that is not evidence the org is gone."""
+    ctx = build_context()
+    run_pipeline(ctx, "Backend Engineer", "fintech")
+    good = company_id(ctx, "good.example")
+    real = ctx.fetcher.get
+
+    def get(url):
+        if url == "https://good.example/":
+            return FetchOutcome(url, 200, "<html><body></body></html>", "ok")
+        return real(url)
+
+    ctx.fetcher.get = get
+    run_pipeline(ctx, "Backend Engineer", "fintech")
+    assert ctx.companies.get(good).github_org == "goodco"
 
 
 def test_facts_are_stamped_with_the_run_date_not_the_wall_clock():

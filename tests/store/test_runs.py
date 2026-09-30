@@ -120,6 +120,45 @@ def test_clear_for_company_is_scoped_to_one_run_and_one_company(tmp_path):
     assert evidence.clear_for_company(r1, a) == 0  # idempotent
 
 
+def test_a_class_filtered_clear_removes_only_the_intended_classes(tmp_path):
+    """Each stage clears its own share of the log in one statement, so a crash
+    can never lose the other stage's rows, and the survivors keep their order."""
+    from outreach.store.runs import FetchAttemptRepo
+    from outreach.types import FetchAttempt, SourceClass
+
+    conn = connect(tmp_path / "t.db")
+    companies, runs = CompanyRepo(conn), RunRepo(conn)
+    attempts = FetchAttemptRepo(conn)
+    a = companies.upsert("a.example", "A", 40, "careers")
+    b = companies.upsert("b.example", "B", 60, "careers")
+    rid = runs.create("Backend Engineer", "fintech", "US", (1, 2000), datetime.now())
+
+    classes = (SourceClass.CAREERS_PAGE, SourceClass.HOMEPAGE, SourceClass.ENG_BLOG,
+               SourceClass.HOMEPAGE)
+
+    def fill():
+        for i, cls in enumerate(classes):
+            attempts.insert(rid, FetchAttempt(a, cls, f"https://a.example/{i}", "ok", 200, 0))
+        attempts.insert(rid, FetchAttempt(b, SourceClass.HOMEPAGE, "https://b.example/",
+                                          "ok", 200, 0))
+
+    fill()
+    homepage = frozenset({SourceClass.HOMEPAGE})
+    assert attempts.clear_for_company(rid, a, keep=homepage) == 2
+    assert [x.url for x in attempts.for_company(rid, a)] == [
+        "https://a.example/1", "https://a.example/3"]
+
+    attempts.clear_for_company(rid, a)
+    fill()
+    assert attempts.clear_for_company(rid, a, only=homepage) == 2
+    assert [x.url for x in attempts.for_company(rid, a)] == [
+        "https://a.example/0", "https://a.example/2"]
+
+    # The sibling company's homepage row was never in scope.
+    assert [x.url for x in attempts.for_company(rid, b)] == [
+        "https://b.example/", "https://b.example/"]
+
+
 def _run_and_company(tmp_path, domain="a.example"):
     conn = connect(tmp_path / "t.db")
     companies, runs = CompanyRepo(conn), RunRepo(conn)
