@@ -1,0 +1,10 @@
+[
+  {"name": "sdk", "description": "Official Acme SDK", "html_url": "https://github.com/acmehq/sdk",
+   "pushed_at": "2026-09-20T12:00:00Z", "fork": false, "archived": false},
+  {"name": "forked-lib", "description": "A fork of an upstream library", "html_url": "https://github.com/acmehq/forked-lib",
+   "pushed_at": "2026-09-25T08:30:00Z", "fork": true, "archived": false},
+  {"name": "old-service", "description": null, "html_url": "https://github.com/acmehq/old-service",
+   "pushed_at": "2026-09-28T10:00:00Z", "fork": false, "archived": true},
+  {"name": "legacy-tool", "description": "Pushed long ago", "html_url": "https://github.com/acmehq/legacy-tool",
+   "pushed_at": "2023-02-14T09:00:00Z", "fork": false, "archived": false}
+]
