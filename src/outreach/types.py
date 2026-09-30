@@ -7,7 +7,14 @@ from typing import Literal
 
 EmailStatus = Literal["verified", "unverified", "not_found"]
 StageStatus = Literal["pending", "ok", "failed", "skipped_quota",
-                      "skipped_domain_unconfirmed"]
+                      "skipped_domain_unconfirmed", "excluded_size",
+                      "excluded_no_matching_posting", "no_findings"]
+# "unknown" is kept by the work-mode filter: a posting that does not say is not
+# evidence against the user's preference.
+WorkMode = Literal["remote", "hybrid", "onsite", "unknown"]
+ALL_WORK_MODES: frozenset[WorkMode] = frozenset({"remote", "hybrid", "onsite"})
+# Only "other" (contract / part-time / intern / temporary) is ever dropped.
+EmploymentType = Literal["full_time", "other", "unknown"]
 
 
 class SourceClass(str, Enum):
@@ -16,8 +23,43 @@ class SourceClass(str, Enum):
     ENG_BLOG = "eng_blog"
     CHANGELOG = "changelog"
     GITHUB = "github"
-    STATUS_PAGE = "status_page"
+    STATUS_PAGE = "status_page"  # legacy: no longer produced, kept so old rows still load
     NEWS = "news"
+    PRESS = "press"
+    ABOUT = "about"
+    HOMEPAGE = "homepage"
+    DEV_DOCS = "dev_docs"
+
+
+class Stage(str, Enum):
+    SEED_STARTUP = "seed_startup"
+    GROWTH = "growth"
+    EXPANSION = "expansion"
+    MATURITY = "maturity"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class FundingRound:
+    # "pre_seed" | "seed" | "series_a".."series_z" | "ipo" | "acquired"
+    kind: str
+    announced: date | None
+
+
+@dataclass(frozen=True)
+class CompanyFacts:
+    headcount: int | None
+    headcount_band: str | None
+    founded_year: int | None
+    funding_rounds: tuple[FundingRound, ...]
+    tags: tuple[str, ...]
+    source: str
+
+
+@dataclass(frozen=True)
+class StageResult:
+    stage: Stage
+    reasons: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -27,6 +69,13 @@ class Company:
     name: str
     headcount: int | None
     headcount_source: str | None
+    # Everything below defaults so positional Company(id, domain, name, hc, src) keeps working.
+    headcount_band: str | None = None
+    founded_year: int | None = None
+    funding_rounds: tuple[FundingRound, ...] = ()
+    tags: tuple[str, ...] = ()
+    github_org: str | None = None
+    facts_fetched_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +130,19 @@ class Bottleneck:
 
 
 @dataclass(frozen=True)
+class Finding:
+    id: int | None
+    company_id: int
+    theme: str
+    claim: str
+    summary: str
+    corroborated: bool
+    passed: bool
+    reason: str
+    evidence_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class FetchAttempt:
     company_id: int
     source_class: SourceClass
@@ -97,6 +159,8 @@ class PostingRef:
     title: str
     url: str
     location: str
+    work_mode: WorkMode = "unknown"
+    employment_type: EmploymentType = "unknown"
 
 
 @dataclass(frozen=True)
