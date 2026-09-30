@@ -140,14 +140,18 @@ def test_a_blog_and_a_job_posting_corroborate_one_bottleneck():
     ctx = _ctx()
     summary = run_pipeline(ctx, "Backend Engineer", "fintech")
     assert summary.evidenced == 1
-    assert summary.no_bottleneck == 0
+    assert summary.no_findings == 0
 
 
 def test_blog_posts_alone_cannot_pass_the_gate():
+    # The shared factory gate now needs one source; this test is about a
+    # two-source gate refusing a single source class, so it asks for one.
     ctx = _ctx(posting_url="https://blogco.example/jobs/missing")
+    ctx = replace(ctx, config=replace(
+        ctx.config, gate=replace(ctx.config.gate, min_independent_sources=2)))
     summary = run_pipeline(ctx, "Backend Engineer", "fintech")
     assert summary.evidenced == 0
-    assert summary.no_bottleneck == 1
+    assert summary.no_findings == 1
 
 
 def test_a_job_posting_hosted_elsewhere_does_not_confirm_a_guessed_domain():

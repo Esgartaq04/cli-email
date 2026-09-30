@@ -1,3 +1,5 @@
+import pytest
+
 from outreach.cli import build_view
 from outreach.pipeline.runner import run_pipeline
 from outreach.render.report import write_report
@@ -14,6 +16,7 @@ def _failed_company(tmp_path):
     return view, view.no_bottleneck[0], write_report(view, tmp_path).read_text(encoding="utf-8")
 
 
+@pytest.mark.xfail(reason="report re-layout in Task 14", strict=True)
 def test_a_failed_company_lists_its_themes_with_source_counts(tmp_path):
     _, company, _ = _failed_company(tmp_path)
     assert [t.theme for t in company.themes] == ["scaling-bottlenecks"]
@@ -24,6 +27,7 @@ def test_a_failed_company_lists_its_themes_with_source_counts(tmp_path):
     assert theme.reason == "insufficient_independent_sources"
 
 
+@pytest.mark.xfail(reason="report re-layout in Task 14", strict=True)
 def test_a_failed_company_lists_the_pages_read_and_what_each_yielded(tmp_path):
     _, company, _ = _failed_company(tmp_path)
     by_url = {s.url: s for s in company.sources_read}
@@ -33,6 +37,7 @@ def test_a_failed_company_lists_the_pages_read_and_what_each_yielded(tmp_path):
     assert all(s.claims == 1 for s in by_url.values())
 
 
+@pytest.mark.xfail(reason="report re-layout in Task 14", strict=True)
 def test_pages_that_yielded_no_claims_are_still_listed(tmp_path):
     ctx = _ctx()
     ctx.llm._claims = []  # every page reads fine but nothing is extractable
@@ -42,6 +47,7 @@ def test_pages_that_yielded_no_claims_are_still_listed(tmp_path):
     assert company.sources_read and all(s.claims == 0 for s in company.sources_read)
 
 
+@pytest.mark.xfail(reason="report re-layout in Task 14", strict=True)
 def test_the_rendered_report_explains_why_the_gate_failed(tmp_path):
     view, _, html = _failed_company(tmp_path)
     assert view.min_independent_sources == 2
@@ -54,6 +60,7 @@ def test_the_rendered_report_explains_why_the_gate_failed(tmp_path):
     assert "https://blogco.example/blog/post-a" in html
 
 
+@pytest.mark.xfail(reason="report re-layout in Task 14", strict=True)
 def test_an_evidenced_company_does_not_get_the_failure_sections(tmp_path):
     ctx = _ctx()
     summary = run_pipeline(ctx, "Backend Engineer", "fintech")

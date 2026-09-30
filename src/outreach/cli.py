@@ -21,7 +21,8 @@ from outreach.render.report import (ReportCompany, ReportContact, ReportEvidence
 from outreach.store.cache import DocumentCache
 from outreach.store.db import connect
 from outreach.store.dimensions import CompanyRepo, ContactRepo, DocumentRepo
-from outreach.store.runs import BottleneckRepo, EvidenceRepo, FetchAttemptRepo, RunRepo
+from outreach.store.runs import (EvidenceRepo, FetchAttemptRepo, FindingRepo, PostingRepo,
+                                 RunRepo)
 from outreach.types import Company, Contact, PersonRef, SourceDocument
 
 app = typer.Typer(help="Outreach research pipeline")
@@ -33,16 +34,21 @@ def build_context(config_path: Path = Path("config.toml")) -> RunContext:
 
     use_fakes = os.environ.get("OUTREACH_FAKE_ADAPTERS") == "1"
     if use_fakes:
+        from outreach.contacts.facts import FakeFactsProvider
         from outreach.contacts.fake import FakeContactProvider
         from outreach.llm.fake import FakeLLM
         from outreach.sources.jobboards.fake import FakeJobBoardSource
         llm, job_board = FakeLLM(), FakeJobBoardSource([])
         provider = FakeContactProvider({}, credits=0)
+        facts_provider = FakeFactsProvider({})
     else:
+        from outreach.contacts.facts import HunterFactsProvider
         from outreach.contacts.hunter import HunterProvider
         from outreach.llm.anthropic_client import AnthropicLLM
         llm = AnthropicLLM(require_env("ANTHROPIC_API_KEY"))
-        provider = HunterProvider(require_env("HUNTER_API_KEY"))
+        hunter_key = require_env("HUNTER_API_KEY")
+        provider = HunterProvider(hunter_key)
+        facts_provider = HunterFactsProvider(hunter_key)
         job_board = None  # set below, needs the fetcher
 
     conn = connect(config.paths.db)
@@ -61,9 +67,11 @@ def build_context(config_path: Path = Path("config.toml")) -> RunContext:
         config=config, today=date.today(),
         companies=CompanyRepo(conn), contacts=ContactRepo(conn),
         documents=DocumentRepo(conn), runs=RunRepo(conn), evidence=EvidenceRepo(conn),
-        bottlenecks=BottleneckRepo(conn), fetch_attempts=FetchAttemptRepo(conn),
+        findings=FindingRepo(conn), postings=PostingRepo(conn),
+        fetch_attempts=FetchAttemptRepo(conn),
         cache=DocumentCache(config.paths.cache), fetcher=fetcher,
         llm=llm, job_board=job_board, contact_provider=provider,
+        facts_provider=facts_provider,
     )
 
 
@@ -309,7 +317,7 @@ def run(
     summary = run_pipeline(ctx, role, sector, resume_run_id=resume)
     path = write_report(build_view(ctx, summary), ctx.config.paths.reports)
     typer.echo(f"Run {summary.run_id}: {summary.evidenced} evidenced, "
-               f"{summary.no_bottleneck} without. Report: {path}")
+               f"{summary.no_findings} without. Report: {path}")
 
 
 @app.command()
@@ -343,7 +351,7 @@ def report(run_id: int = typer.Argument(..., help="A previous run's id")) -> Non
         run_id=run_id, role_title=row["role_title"], sector=row["sector"],
         companies=len(bottlenecks),
         evidenced=sum(1 for b in bottlenecks if b.passed),
-        no_bottleneck=sum(1 for b in bottlenecks if not b.passed),
+        no_findings=sum(1 for b in bottlenecks if not b.passed),
         quotes_accepted=quotes_accepted,
     )
     path = write_report(build_view(ctx, summary, fresh=False), ctx.config.paths.reports)
