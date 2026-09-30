@@ -59,3 +59,8 @@ def test_parse_repos_recency_cutoff_is_inclusive():
 def test_parse_repos_malformed_json_is_empty():
     assert parse_repos("not json", date(2026, 9, 30), 180, 5) == []
     assert parse_repos('{"message": "Not Found"}', date(2026, 9, 30), 180, 5) == []
+
+
+def test_find_github_org_survives_an_unparseable_href():
+    html = '<a href="http://[bad">x</a><a href="https://github.com/acme">y</a>'
+    assert find_github_org(html) == "acme"

@@ -19,7 +19,9 @@ _MONTHS = {name: i for i, full in enumerate(_MONTH_NAMES, 1) for name in (full, 
 _MONTHS["sept"] = 9
 _MONTH = r"(?P<mon>[A-Za-z]{3,9})\.?"
 
-_ISO = re.compile(r"\b(?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})\b")
+# No trailing \b: a <time datetime="2026-08-01T10:00:00Z"> timestamp has a word
+# character (T) right after the day, so a boundary check would reject it.
+_ISO = re.compile(r"\b(?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})(?!\d)")
 _MONTH_FIRST = re.compile(rf"\b{_MONTH}\s+(?P<d>\d{{1,2}}),?\s+(?P<y>\d{{4}})\b")
 _DAY_FIRST = re.compile(rf"\b(?P<d>\d{{1,2}})\s+{_MONTH},?\s+(?P<y>\d{{4}})\b")
 

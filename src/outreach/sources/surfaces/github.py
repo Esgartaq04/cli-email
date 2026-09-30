@@ -26,7 +26,10 @@ class Repo:
 
 
 def _org_from_href(href: str) -> str | None:
-    parts = urlsplit(href.strip())
+    try:
+        parts = urlsplit(href.strip())
+    except ValueError:
+        return None  # e.g. "http://[bad": third-party HTML can hold any href
     # Compare the raw netloc, not .hostname: a userinfo trick such as
     # "https://github.com\@evil.example/x" must not pass as github.com.
     if parts.scheme not in ("http", "https") or parts.netloc.lower() not in _GITHUB_HOSTS:

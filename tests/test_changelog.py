@@ -53,3 +53,13 @@ def test_an_impossible_date_is_not_an_entry():
 
 def test_a_word_that_merely_starts_like_a_month_is_not_a_date():
     assert split_changelog("<h2>12 Marketing 2026</h2><p>body</p>") == []
+
+
+def test_timestamped_time_datetime_supplies_the_date():
+    html = '<h2><time datetime="2026-08-01T10:00:00Z">Release</time></h2><p>body</p>'
+    assert [e.published_at for e in split_changelog(html)] == [date(2026, 8, 1)]
+
+
+def test_timestamped_datetime_wins_over_visible_text():
+    html = '<h2><time datetime="2026-08-01T10:00:00+02:00">Aug 1</time></h2><p>body</p>'
+    assert [e.published_at for e in split_changelog(html)] == [date(2026, 8, 1)]
