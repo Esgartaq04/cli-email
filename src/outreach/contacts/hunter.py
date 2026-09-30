@@ -18,6 +18,7 @@ _BASE_URL = "https://api.hunter.io/v2"
 # need this: they are always built from `canonical_domain`, never taken
 # verbatim from a third-party API response.
 _SAFE_URL_SCHEMES = ("http://", "https://")
+_UNSAFE_URL_CHARS = re.compile(r"[\\\s\x00-\x1f\x7f]")
 _LINKEDIN_HANDLE = re.compile(r"^[A-Za-z0-9_-]{3,100}$")
 
 
@@ -26,9 +27,24 @@ def _safe_linkedin_url(value: object) -> str | None:
         return None
     value = value.strip()
     if value.startswith(_SAFE_URL_SCHEMES):
-        host = (urlparse(value).hostname or "").lower()
+        # `urlparse` and browsers disagree about a backslash (browsers read it
+        # as `/` in http(s) URLs), so `https://evil.example\@linkedin.com/`
+        # parses as host linkedin.com yet navigates to evil.example. Nothing
+        # legitimate needs a backslash, whitespace or a control character.
+        if _UNSAFE_URL_CHARS.search(value):
+            return None
+        try:
+            parsed = urlparse(value)
+        except ValueError:
+            return None
+        host = (parsed.hostname or "").lower()
+        # The authority must be exactly the host: no userinfo, no port.
+        if parsed.netloc.lower() != host:
+            return None
         if host == "linkedin.com" or host.endswith(".linkedin.com"):
-            return value
+            # Rebuilt from the validated parts rather than echoed back, so no
+            # attacker-shaped authority, query or fragment survives.
+            return f"{parsed.scheme}://{host}{parsed.path}"
         return None
     # Hunter sometimes returns just the handle rather than a URL.
     if _LINKEDIN_HANDLE.match(value):
