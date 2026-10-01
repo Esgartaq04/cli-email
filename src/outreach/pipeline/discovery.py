@@ -8,6 +8,7 @@ single Hunter credit. What survives is handed to the runner.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from typing import TYPE_CHECKING, Sequence
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from outreach.pipeline.runner import RunSummary
 
 HN_ITEM_URL = "https://news.ycombinator.com/item?id={}"
+_GENERIC_OPENINGS = re.compile(r"\b(?:roles|positions|openings)\b")
 
 
 @dataclass(frozen=True)
@@ -80,10 +82,16 @@ def select_hn_candidates(ctx: RunContext, run_id: int, terms: Sequence[str],
     seen: set[str] = set()
     for post in thread.posts:
         text = post_text(post.html)
-        lowered = text.lower()
         # The free prefilter: nothing below, the LLM least of all, ever
-        # looks at a post for a role nobody asked about.
-        if not any(term in lowered for term in wanted):
+        # looks at a post for a role nobody asked about. A pipe-format post
+        # names its role on the first line -- a designer post that mentions
+        # "our backend engineers" in passing is not a backend opening -- so
+        # the body only counts for free-text posts and for first lines that
+        # just say "multiple roles".
+        first_line = text.split("\n", 1)[0].lower()
+        haystack = (first_line if "|" in first_line and not _GENERIC_OPENINGS.search(first_line)
+                    else text.lower())
+        if not any(term in haystack for term in wanted):
             continue
         summary.hn_role_matched += 1
 

@@ -116,3 +116,22 @@ def test_no_thread_is_an_hn_error_not_a_crash():
     selection, summary = _select(ctx)
     assert selection.kept == [] and selection.thread is None
     assert "hn: no Who is hiring? thread found" in summary.errors
+
+
+def test_a_role_named_only_in_the_body_of_a_pipe_post_does_not_match():
+    designer = (401, 'Paintbox | Product Designer | Remote (US) | REMOTE<p>You will work closely '
+                     'with our backend engineers. <a href="https://paintbox.co">paintbox.co</a>')
+    selection, summary = _select(_ctx(item_ids=[], extra=[designer]))
+    assert summary.hn_role_matched == 0 and selection.kept == []
+
+
+def test_generic_openings_in_the_first_line_fall_back_to_the_body():
+    multi = (402, 'Quarry | Multiple engineering roles | Remote (US) | REMOTE<p>Hiring a Backend '
+                  'Engineer and an SRE. <a href="https://quarry.dev">quarry.dev</a>')
+    _, summary = _select(_ctx(item_ids=[], extra=[multi]))
+    assert summary.hn_role_matched == 1
+
+
+def test_free_text_posts_still_match_on_the_body():
+    _, summary = _select(_ctx(item_ids=[108]))
+    assert summary.hn_role_matched == 1
