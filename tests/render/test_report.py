@@ -207,3 +207,18 @@ def test_diagnostics_footer_is_rendered():
 def test_unconfirmed_domain_shows_a_note_instead_of_empty_contacts():
     html = render_report(view_with(target=[card(domain_confirmed=False, contacts=[])]))
     assert "unconfirmed" in html.lower()
+
+
+def test_hn_company_card_links_its_post():
+    html = render_report(view_with(target=[card(hn_post=(
+        "via HN Who is hiring? (September 2026)", "https://news.ycombinator.com/item?id=101"))]))
+    assert 'href="https://news.ycombinator.com/item?id=101"' in html
+    assert "via HN Who is hiring? (September 2026)" in html
+
+
+def test_skipped_cap_and_recent_are_listed_as_excluded():
+    html = render_report(view_with(excluded=[
+        ReportExcluded("Acme", "acme.io", "skipped_cap"),
+        ReportExcluded("Zeta", "zeta.io", "skipped_recent")], hn_recheck_days=30))
+    assert "not this run — over the HN cap" in html
+    assert "researched in the last 30 days" in html

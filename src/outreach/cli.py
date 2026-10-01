@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections import Counter
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -20,7 +21,8 @@ from outreach.render.view import build_view
 from outreach.store.cache import DocumentCache
 from outreach.store.db import connect
 from outreach.store.dimensions import CompanyRepo, ContactRepo, DocumentRepo
-from outreach.store.runs import (EvidenceRepo, FetchAttemptRepo, FindingRepo, PostingRepo,
+from outreach.store.runs import (EvidenceRepo, FetchAttemptRepo, FindingRepo, HNPostRepo,
+                                 PostingRepo,
                                  RunRepo)
 
 app = typer.Typer(help="Outreach research pipeline")
@@ -39,6 +41,8 @@ def build_context(config_path: Path = Path("config.toml")) -> RunContext:
         llm, job_board = FakeLLM(), FakeJobBoardSource([])
         provider = FakeContactProvider({}, credits=0)
         facts_provider = FakeFactsProvider({})
+        from outreach.sources.hn import FakeHNSource
+        hn = FakeHNSource()
     else:
         from outreach.contacts.facts import HunterFactsProvider
         from outreach.contacts.hunter import HunterProvider
@@ -58,6 +62,8 @@ def build_context(config_path: Path = Path("config.toml")) -> RunContext:
         user_agent=build_user_agent(os.environ.get("OUTREACH_CONTACT_EMAIL")),
     )
     if not use_fakes:
+        from outreach.sources.hn import HNThreadSource
+        hn = HNThreadSource(fetcher)
         from outreach.sources.jobboards.ashby import AshbyBoardSource
         from outreach.sources.jobboards.greenhouse import GreenhouseBoardSource
         from outreach.sources.jobboards.lever import LeverBoardSource
@@ -81,7 +87,31 @@ def build_context(config_path: Path = Path("config.toml")) -> RunContext:
         cache=DocumentCache(config.paths.cache), fetcher=fetcher,
         llm=llm, job_board=job_board, contact_provider=provider,
         facts_provider=facts_provider,
+        hn=hn, hn_posts=HNPostRepo(conn),
     )
+
+
+def _dry_run_hn(ctx: RunContext, terms, work_modes, known: frozenset[str]) -> set[str]:
+    """Read and parse the HN thread for free -- no LLM fallback, no Hunter call --
+    print its funnel, and return the domains a real run would research."""
+    from outreach.pipeline.discovery import select_hn_candidates
+    probe = RunSummary(run_id=0)  # matches no stored run, so the recency check still works
+    try:
+        selection = select_hn_candidates(ctx, 0, terms, work_modes, known, probe,
+                                         allow_llm=False)
+    except Exception as exc:
+        typer.echo(f"Warning: HN discovery failed: {exc}", err=True)
+        return set()
+    for error in probe.errors:
+        typer.echo(f"Warning: {error}", err=True)
+    if selection.thread is None:
+        return set()
+    typer.echo(
+        f"HN: {selection.thread.title} — {probe.hn_posts_read} posts, "
+        f"{probe.hn_role_matched} match the role, {probe.hn_parsed} parsed, "
+        f"{selection.needs_llm} would need the LLM fallback, "
+        f"{len(selection.kept)} kept after the cap.")
+    return {c.parsed.domain for c in [*selection.kept, *selection.known]}
 
 
 def _summary_from_storage(ctx: RunContext, run_id: int, role_title: str,
@@ -110,6 +140,8 @@ def _summary_from_storage(ctx: RunContext, run_id: int, role_title: str,
         no_findings=len({f.company_id for f in findings} - evidenced),
         excluded_size=count("enrich", "excluded_size"),
         excluded_no_matching_posting=count("discover", "excluded_no_matching_posting"),
+        hn_skipped_cap=count("discover", "skipped_cap"),
+        hn_skipped_recent=count("discover", "skipped_recent"),
         stage_counts=dict(Counter(s.stage.value for s in stages if s is not None)),
         quotes_accepted=sum(len(ctx.evidence.for_company(run_id, c)) for c in company_ids),
     )
@@ -124,6 +156,8 @@ def run(
         help="Comma-separated remote, hybrid, onsite. Default: all three."),
     dry_run: bool = typer.Option(False, "--dry-run"),
     resume: int | None = typer.Option(None, "--resume"),
+    no_hn: bool = typer.Option(
+        False, "--no-hn", help="Skip discovery from HN's Who is hiring? thread."),
 ) -> None:
     # Validated before build_context so a typo costs nothing: building the
     # context checks API keys and opens the database.
@@ -139,6 +173,9 @@ def run(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2)
 
+    if no_hn:
+        ctx.config = replace(ctx.config, hn=replace(ctx.config.hn, enabled=False))
+
     if not os.environ.get("OUTREACH_CONTACT_EMAIL", "").strip():
         # The user agent still identifies the tool, but without a contact
         # address a site operator who notices this traffic has no way to
@@ -150,7 +187,8 @@ def run(
             err=True)
 
     discovery = ctx.config.discovery
-    if not (discovery.greenhouse_tokens or discovery.ashby_tokens or discovery.lever_tokens):
+    if not (discovery.greenhouse_tokens or discovery.ashby_tokens or discovery.lever_tokens
+            or ctx.config.hn.enabled):
         # Without this, a first real run silently discovers zero companies
         # and writes an empty report with no indication why -- config.toml
         # ships with empty lists, so this is the actual first-run
@@ -170,8 +208,10 @@ def run(
                 typer.echo(f"Warning: discovery board failed: {error}", err=True)
         # The same filter the pipeline applies: a company with no posting in
         # the wanted work mode is excluded before any credit is spent on it.
-        companies = len({p.company_domain for p in postings
-                         if posting_matches(p, work_modes)})
+        domains = {p.company_domain for p in postings if posting_matches(p, work_modes)}
+        if ctx.config.hn.enabled:
+            domains |= _dry_run_hn(ctx, terms, work_modes, frozenset(domains))
+        companies = len(domains)
         hunter = ctx.config.hunter
         finder = hunter.finder_cost if hunter.linkedin_lookup else 0
         enrichment = companies * hunter.enrichment_cost

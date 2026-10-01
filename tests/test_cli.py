@@ -65,13 +65,15 @@ def test_dry_run_reports_planned_spend_and_writes_no_report(tmp_path, monkeypatc
     assert "would use" in result.output.lower()
 
 
-def test_empty_token_lists_warn_about_all_three_boards(monkeypatch):
-    """config.toml ships with empty token lists -- without a warning, a first
-    real run silently discovers zero companies and writes an empty report
-    with no indication why."""
+def test_empty_token_lists_warn_about_all_three_boards(monkeypatch, tmp_path):
+    """With no tokens AND HN discovery off, a real run would silently discover
+    zero companies and write an empty report with no indication why."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
     monkeypatch.setenv("HUNTER_API_KEY", "test")
     monkeypatch.setenv("OUTREACH_FAKE_ADAPTERS", "1")
+    config = tmp_path / "config.toml"
+    config.write_text(config.read_text(encoding="utf-8") + "\n[hn]\nenabled = false\n",
+                      encoding="utf-8")
     result = runner.invoke(app, ["run", "--role", "Backend Engineer",
                                  "--sector", "fintech", "--dry-run"])
     assert "no greenhouse_tokens, ashby_tokens or lever_tokens" in result.output
@@ -260,3 +262,47 @@ def test_real_adapters_build_one_source_per_configured_board(monkeypatch, tmp_pa
     assert [type(s).__name__ for s in ctx.job_board.sources] == [
         "GreenhouseBoardSource", "LeverBoardSource"]
     assert ctx.job_board.sources[1].tokens == ("l1", "l2")
+
+
+def test_empty_tokens_with_hn_enabled_does_not_warn(monkeypatch):
+    _fake_adapters(monkeypatch)
+    result = runner.invoke(app, ["run", "--role", "Backend Engineer", "--sector", "fintech",
+                                 "--dry-run"])
+    assert "discover zero companies" not in result.output
+
+
+def _fake_thread(monkeypatch, calls):
+    from outreach.sources.hn import FakeHNSource
+    from tests.pipeline.factories import hn_thread
+
+    def latest(self):
+        calls.append(1)
+        return hn_thread()
+    monkeypatch.setattr(FakeHNSource, "latest_thread", latest)
+
+
+def test_no_hn_flag_disables_discovery(monkeypatch):
+    _fake_adapters(monkeypatch)
+    calls: list = []
+    _fake_thread(monkeypatch, calls)
+    runner.invoke(app, ["run", "--role", "Backend Engineer", "--sector", "fintech",
+                        "--no-hn", "--dry-run"])
+    assert calls == []
+    runner.invoke(app, ["run", "--role", "Backend Engineer", "--sector", "fintech", "--dry-run"])
+    assert calls == [1]
+
+
+def test_dry_run_reports_hn_funnel_without_llm_calls(monkeypatch):
+    _fake_adapters(monkeypatch)
+    _fake_thread(monkeypatch, [])
+    from outreach.llm.fake import FakeLLM
+
+    def must_not_call(self, text):
+        raise AssertionError("dry run called the LLM fallback")
+    monkeypatch.setattr(FakeLLM, "parse_job_post", must_not_call)
+    result = runner.invoke(app, ["run", "--role", "Backend Engineer", "--sector", "fintech",
+                                 "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert ("HN: Ask HN: Who is hiring? (September 2026) — 11 posts, 8 match the role, "
+            "5 parsed, 3 would need the LLM fallback, 4 kept after the cap.") in result.output
+    assert "Dry run: 4 companies matched." in result.output

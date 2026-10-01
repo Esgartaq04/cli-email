@@ -90,7 +90,10 @@ def test_reconstructed_summary_shows_not_recorded_for_unrecoverable_diagnostics(
     # quotes_rejected, skipped_quota, skipped_domain_unconfirmed, failures,
     # facts fetched/cached, wall clock, credits remaining, credits consumed,
     # and the errors list: none of these nine is recoverable from storage.
-    assert html.count("not recorded") == 9
+    # Nor are five HN diagnostics: the thread title, posts read / matching,
+    # parsed / LLM-parsed / rejected, filtered out, and HN kept (the HN
+    # skips ARE recoverable, from stage rows).
+    assert html.count("not recorded") == 14
     assert "Quotes accepted" in html and str(real_summary.quotes_accepted) in html
 
 
@@ -271,3 +274,32 @@ def test_current_state_surface_date_is_labeled_distinctly_from_a_real_date(tmp_p
     summary = run_pipeline(ctx, "Backend Engineer", "fintech")
     html = _html(build_view(ctx, summary), tmp_path)
     assert "current as of" in html
+
+
+def test_hn_companies_and_funnel_reach_the_report(tmp_path):
+    from outreach.config import HNConfig
+    from outreach.sources.hn import FakeHNSource
+    from tests.pipeline.factories import hn_thread
+    ctx = build_context(routes={"https://acmerobotics.com/": "<html>Acme</html>",
+                                "https://zetapay.com/": "<html>Zeta</html>"})
+    ctx.hn = FakeHNSource(hn_thread(item_ids=[101, 102]))
+    ctx.config = replace(ctx.config, hn=replace(HNConfig(), max_new_companies=1))
+    summary = run_pipeline(ctx, "Backend Engineer", "fintech")
+    html = _html(build_view(ctx, summary), tmp_path)
+    assert "Ask HN: Who is hiring? (September 2026)" in html
+    assert "HN posts read / matching role" in html
+    assert "via HN Who is hiring? (September 2026)" in html
+    assert "not this run — over the HN cap" in html
+
+
+def test_reconstructed_summary_recovers_hn_skips_from_stage_rows():
+    from outreach.config import HNConfig
+    from outreach.sources.hn import FakeHNSource
+    from tests.pipeline.factories import hn_thread
+    ctx = build_context()
+    ctx.hn = FakeHNSource(hn_thread(item_ids=[101, 102]))
+    ctx.config = replace(ctx.config, hn=replace(HNConfig(), max_new_companies=1))
+    fresh = run_pipeline(ctx, "Backend Engineer", "fintech")
+    rebuilt = _summary_from_storage(ctx, fresh.run_id, "Backend Engineer", "fintech")
+    assert (rebuilt.hn_skipped_cap, rebuilt.hn_skipped_recent) == (1, 0)
+    assert fresh.hn_skipped_cap == 1

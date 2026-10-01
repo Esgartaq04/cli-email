@@ -31,7 +31,8 @@ _TARGET_STAGES = frozenset({Stage.GROWTH, Stage.EXPANSION})
 
 # The stage row that records each way a run drops a company before
 # researching it, and the status it writes there.
-_EXCLUSIONS = (("discover", "excluded_no_matching_posting"), ("enrich", "excluded_size"))
+_EXCLUSIONS = (("discover", "excluded_no_matching_posting"), ("enrich", "excluded_size"),
+               ("discover", "skipped_cap"), ("discover", "skipped_recent"))
 
 
 def _rank_and_cap_contacts(
@@ -213,12 +214,21 @@ def _card(ctx: RunContext, run_id: int, company: Company, stage: StageResult | N
                    for a in ctx.fetch_attempts.for_company(run_id, company_id)],
         domain_confirmed=(ctx.runs.stage_status(run_id, company_id, "contacts")
                           != "skipped_domain_unconfirmed"),
+        hn_post=_hn_link(ctx, run_id, company_id),
     )
     if not passing:
         card.themes, card.sources_read = _theme_breakdown(ctx, run_id, company_id)
     if reason == "research_failed":
         card.error = _failure_error(ctx, run_id, company_id)
     return card
+
+
+def _hn_link(ctx: RunContext, run_id: int, company_id: int) -> tuple[str, str] | None:
+    record = ctx.hn_posts.for_company(run_id, company_id) if ctx.hn_posts else None
+    if record is None:
+        return None
+    return (f"via HN Who is hiring? ({record.posted_at:%B %Y})",
+            f"https://news.ycombinator.com/item?id={record.item_id}")
 
 
 def _stage_counts(counts: dict[str, int]) -> str:
@@ -291,6 +301,7 @@ def build_view(ctx: RunContext, summary: RunSummary, fresh: bool = True) -> Repo
         no_findings=ordered(sections["none"]),
         excluded=ordered(excluded),
         min_independent_sources=ctx.config.gate.min_independent_sources,
+        hn_recheck_days=ctx.config.hn.recheck_days,
         # Errors aren't persisted past the run that produced them either --
         # same "not recorded" honesty as the diagnostics values below.
         errors=summary.errors if fresh else ["not recorded"],
@@ -300,6 +311,17 @@ def build_view(ctx: RunContext, summary: RunSummary, fresh: bool = True) -> Repo
             "Excluded — over size cap": str(summary.excluded_size),
             "Excluded — work mode": str(summary.excluded_no_matching_posting),
             "Companies by stage": _stage_counts(summary.stage_counts),
+            "HN thread": (summary.hn_thread_title or "none read") if fresh else not_recorded,
+            "HN posts read / matching role": (
+                f"{summary.hn_posts_read} / {summary.hn_role_matched}"
+                if fresh else not_recorded),
+            "HN parsed / LLM-parsed / LLM-rejected": (
+                f"{summary.hn_parsed} / {summary.hn_llm_parsed} / {summary.hn_llm_rejected}"
+                if fresh else not_recorded),
+            "HN filtered out": str(summary.hn_filtered) if fresh else not_recorded,
+            "HN kept / skipped (cap) / skipped (recent)": (
+                f"{summary.hn_kept if fresh else not_recorded} / {summary.hn_skipped_cap}"
+                f" / {summary.hn_skipped_recent}"),
             "Company facts fetched / cached": (
                 f"{summary.facts_fetched} / {summary.facts_cached}"
                 if fresh else not_recorded),

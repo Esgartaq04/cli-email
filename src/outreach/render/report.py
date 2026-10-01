@@ -126,6 +126,8 @@ class ReportCompany:
     fetch_log: list[tuple[str, str, int | None]] = field(default_factory=list)
     domain_confirmed: bool = True
     error: str | None = None
+    # (label, url) of the HN "Who is hiring?" post the company came from.
+    hn_post: tuple[str, str] | None = None
     # Only for a company without findings: what was found, and why it fell short.
     themes: list[ReportTheme] = field(default_factory=list)
     sources_read: list[ReportSource] = field(default_factory=list)
@@ -148,6 +150,7 @@ class ReportView:
     diagnostics: dict[str, str]
     errors: list[str] = field(default_factory=list)
     min_independent_sources: int = 1
+    hn_recheck_days: int = 30
 
 
 _env = Environment(
@@ -197,6 +200,8 @@ REASON_TEXT = {
     "research_failed": "research could not be completed",
     "excluded_size": "over {headcount_max:,} employees",
     "excluded_no_matching_posting": "no full-time posting in the requested work mode",
+    "skipped_cap": "not this run — over the HN cap",
+    "skipped_recent": "researched in the last {hn_recheck_days} days",
 }
 
 
@@ -206,7 +211,8 @@ def describe_reason(reason: str, view: ReportView) -> str:
     if text is None:
         return reason
     return text.format(headcount_max=view.headcount_max,
-                       min_independent_sources=view.min_independent_sources)
+                       min_independent_sources=view.min_independent_sources,
+                       hn_recheck_days=view.hn_recheck_days)
 
 
 def render_report(view: ReportView) -> str:
