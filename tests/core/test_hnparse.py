@@ -156,3 +156,16 @@ def test_validator_rejects_a_domain_that_is_only_a_prefix_of_one_in_the_text():
     p = ParsedPost("Acme", "acme.co", None, "Backend Engineer", "", "remote", "unknown")
     assert validate_llm_post(p, html) is None
     assert validate_llm_post(replace(p, domain="acme.com"), html).domain == "acme.com"
+
+
+@pytest.mark.parametrize("location,expected", [
+    ("Remote (Europe, US hours overlap)", False),
+    ("LATAM (US timezones)", False),
+    ("Remote - Contact us", False),
+    ("US", True),
+    ("U.S.", True),
+    ("Remote, US", True),
+    ("Remote (US)", True),
+])
+def test_us_matching_needs_more_than_a_bare_us_word(location, expected):
+    assert matches_region(location, "US") is expected
