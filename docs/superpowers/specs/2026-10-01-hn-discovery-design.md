@@ -1,7 +1,7 @@
 # Spec B — Startup Discovery from HN "Who is hiring?"
 
 **Date:** 2026-10-01 · **Branch:** `feat/hn-discovery`
-**Status:** Approved for planning (2026-10-01)
+**Status:** Implemented on `feat/hn-discovery` (2026-10-01). See **As built** at the end.
 **Builds on:** `2026-09-30-startup-stage-targeting-design.md` (Spec A), including its **As built** section.
 
 ## Context
@@ -127,3 +127,30 @@ All tests use fakes and fixtures; no live API.
 - Following careers pages to find an embedded board (`?ashby_jid=`); those posts use the post-as-posting path.
 - Other discovery sources (YC directory, Wellfound).
 - Remembering failed LinkedIn lookups (Spec A deferred gap).
+
+## As built
+
+Decisions taken during implementation and the whole-branch review, recorded here because the execution ledger is deleted after the work lands.
+
+**Departures from the text above**
+
+- **US locations.** `region._US_MARKERS` gained common US hubs written without a state code (NYC, New York, SF, Bay Area, Seattle, Boston, Austin, Los Angeles, Chicago, Denver, Atlanta, Miami, DC) and "us-only"/"remote, us". A location that is exactly "US"/"USA"/"United States" matches; "US" inside a phrase ("US hours overlap", "LATAM (US timezones)") does not. This also applies to Greenhouse/Ashby/Lever postings.
+- **Work-mode tags.** A first-line segment that is only a work-mode tag ("| REMOTE |") is read in the loose location slot of `classify_work_mode`; an employment-only segment ("| Contract |") is passed as the declared employment type.
+- **Company domain.** A domain written in the company segment ("Acme (acme.io)", "Modash.io") wins; otherwise the first link whose host is not in a non-company *family* (ATS and job boards incl. Workable/Dover/WaaS and EU Greenhouse, forms/docs/video, social, press, webmail, shorteners — matched as the host or any subdomain). Tech names elsewhere in the first line ("ASP.NET Engineer") are never domains.
+- **LLM output validation** additionally rejects non-company domains, a domain seen in the text only inside an email address or as a prefix of a longer one ("acme.co" vs "acme.com"), and empty or >120-character company/role; the board always comes from the post's links, never the model; an unsupported "other" employment is downgraded to "unknown".
+- **Role prefilter** matches a pipe-format post on its first line; the body counts only for free-text posts and first lines that name generic openings ("roles", "positions", "openings").
+- **Resume** never re-selects: `run_hn_posts` stores each post's parsed fields and HTML, and a resumed run rebuilds its HN selection from them without calling HN or the LLM.
+- **Recheck window** is measured from the run date (`ctx.today`), like the facts TTL.
+- A board posting "covers" an HN company only if it also passes the work-mode filter; otherwise the HN post is added as its posting.
+- `run_hn_posts` also stores the thread title, for the "via HN Who is hiring? (Month Year)" link.
+
+**Known gaps, deferred**
+
+- The role or company segment can be a non-role ("acme.com", "Series A", or "(YC W23)" kept in the company name), and an HN company name overwrites the stored name on upsert (including skipped companies).
+- Company/role checks in the LLM validator are plain substrings with no minimum length.
+- A config-token company whose board posting fails the work-mode filter does not fall back to its HN post, though `run_hn_posts` records it as kept.
+- A config token `acme` (guessed `acme.com`) and an HN post for `jobs.ashbyhq.com/acme` whose site is `acme.io` become two companies.
+- The dry-run HN line does not show how many posts survived the region/work-mode filters.
+- Greenhouse embed links (`boards.greenhouse.io/embed/job_app?for=acme`) yield token `embed` (falls back to the post).
+- The duplicate-company check runs after the LLM fallback, so a company's second unparsed post can spend a fallback call; fake-adapter runs always log "hn: no Who is hiring? thread found".
+- Multi-region locations with a non-US marker ("Remote (US/Canada)") are filtered out (Spec A's strict US policy).

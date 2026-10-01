@@ -1,5 +1,7 @@
 # HN Discovery Implementation Plan
 
+> **Status:** Executed inline (executing-plans) with a whole-branch review and one fix pass. Departures are recorded in the spec's **As built** section.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Every `outreach run` also discovers companies from the latest HN "Ask HN: Who is hiring?" thread. It parses posts deterministically, with a capped and validated LLM fallback, filters and pre-ranks them for free, caps them, and feeds them into the Spec A pipeline.
