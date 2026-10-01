@@ -69,18 +69,21 @@ GOOD_HOME = ('<html><body><a href="https://github.com/goodco">GitHub</a>'
 CONFIG = Config(
     gate=GateConfig(1, True, 180, frozenset({
         "job_posting", "careers_page", "eng_blog", "changelog", "github",
-        "status_page", "press", "about"})),
+        "status_page", "press", "about", "hn_post"})),
     ranking=RankingConfig(3, ("recruit", "talent", "sourcer")),
     discovery=DiscoveryConfig(1, 2000, "US", ()),
     paths=PathsConfig(Path("db"), Path("cache"), Path("reports")),
 )
 
 
-def _transport(explode_on_domain: str | None):
+def _transport(explode_on_domain: str | None, routes: dict[str, str] | None = None):
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
         if url.endswith("robots.txt"):
             return httpx.Response(404)
+        for prefix, body in (routes or {}).items():
+            if url.startswith(prefix):
+                return httpx.Response(200, text=body)
         if explode_on_domain and explode_on_domain in url:
             # Deliberately NOT an httpx error: Fetcher.get catches
             # httpx.HTTPError by design and converts it into a
@@ -121,6 +124,7 @@ def build_context(
     include_unconfirmed_domain: bool = False,
     facts: dict[str, CompanyFacts] | None = None,
     facts_fail_on: frozenset[str] = frozenset(),
+    routes: dict[str, str] | None = None,
 ) -> RunContext:
     root = Path(tempfile.mkdtemp())
     conn = connect(root / "t.db")
@@ -172,7 +176,7 @@ def build_context(
         findings=FindingRepo(conn), postings=PostingRepo(conn),
         fetch_attempts=FetchAttemptRepo(conn),
         cache=DocumentCache(root / "cache"),
-        fetcher=Fetcher(httpx.Client(transport=_transport(explode_on_domain)),
+        fetcher=Fetcher(httpx.Client(transport=_transport(explode_on_domain, routes)),
                         sleep=lambda seconds: None),
         llm=FakeLLM(claims=claims, titles=["backend engineer"]),
         job_board=FakeJobBoardSource(postings),
