@@ -65,16 +65,105 @@ def test_dry_run_reports_planned_spend_and_writes_no_report(tmp_path, monkeypatc
     assert "would use" in result.output.lower()
 
 
-def test_empty_greenhouse_tokens_warns_instead_of_silently_finding_nothing(monkeypatch):
-    """config.toml ships with `greenhouse_tokens = []` -- without a warning,
-    a first real run silently discovers zero companies and writes an empty
-    report with no indication why."""
+def test_empty_token_lists_warn_about_all_three_boards(monkeypatch):
+    """config.toml ships with empty token lists -- without a warning, a first
+    real run silently discovers zero companies and writes an empty report
+    with no indication why."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
     monkeypatch.setenv("HUNTER_API_KEY", "test")
     monkeypatch.setenv("OUTREACH_FAKE_ADAPTERS", "1")
     result = runner.invoke(app, ["run", "--role", "Backend Engineer",
                                  "--sector", "fintech", "--dry-run"])
-    assert "greenhouse_tokens is empty" in result.output
+    assert "no greenhouse_tokens, ashby_tokens or lever_tokens" in result.output
+
+
+def test_one_configured_board_silences_the_empty_token_warning(monkeypatch, tmp_path):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setenv("HUNTER_API_KEY", "test")
+    monkeypatch.setenv("OUTREACH_FAKE_ADAPTERS", "1")
+    config = tmp_path / "config.toml"
+    config.write_text(config.read_text(encoding="utf-8").replace(
+        "greenhouse_tokens = []", 'greenhouse_tokens = []\nlever_tokens = ["acme"]'),
+        encoding="utf-8")
+    result = runner.invoke(app, ["run", "--role", "Backend Engineer",
+                                 "--sector", "fintech", "--dry-run"])
+    assert "discover zero companies" not in result.output
+
+
+def test_bad_work_mode_exits_before_anything_runs(monkeypatch):
+    """The flag is validated before `build_context`, so a typo costs nothing --
+    not even the API-key check."""
+    monkeypatch.setenv("OUTREACH_FAKE_ADAPTERS", "1")
+
+    def must_not_build(*args, **kwargs):
+        raise AssertionError("build_context ran before --work-mode was validated")
+
+    monkeypatch.setattr("outreach.cli.build_context", must_not_build)
+    result = runner.invoke(app, ["run", "--role", "X", "--sector", "y",
+                                 "--work-mode", "sometimes", "--dry-run"])
+    assert result.exit_code == 2
+    assert "sometimes" in result.output
+
+
+def _fake_postings(monkeypatch, postings):
+    """Make the fake job board return `postings` (it returns none by default)."""
+    from outreach.sources.jobboards.fake import FakeJobBoardSource
+    monkeypatch.setattr(FakeJobBoardSource, "search",
+                        lambda self, role_terms, region: list(postings))
+
+
+def _posting(domain, work_mode="unknown", employment_type="unknown"):
+    from outreach.types import PostingRef
+    return PostingRef(company_name=domain, company_domain=domain, title="Backend Engineer",
+                      url=f"https://{domain}/jobs/1", location="Remote",
+                      work_mode=work_mode, employment_type=employment_type)
+
+
+def test_dry_run_itemizes_credit_buckets(monkeypatch):
+    _fake_adapters(monkeypatch)
+    result = runner.invoke(app, ["run", "--role", "Backend Engineer", "--sector", "fintech",
+                                 "--work-mode", "remote", "--dry-run"])
+    assert result.exit_code == 0
+    assert "enrichment" in result.output
+    assert "contact-search" in result.output
+    assert "LinkedIn-lookup" in result.output
+
+
+def test_dry_run_counts_only_companies_with_a_matching_posting(monkeypatch):
+    """Two companies match --work-mode remote, one is onsite-only and one is a
+    contract role: only the first two are spent on. cap=3, 1 credit each:
+    2 enrichment + 2 contact-search + 2*3 LinkedIn lookups = 10."""
+    _fake_adapters(monkeypatch)
+    _fake_postings(monkeypatch, [
+        _posting("a.com", "remote"), _posting("a.com", "onsite"),
+        _posting("b.com", "unknown"),
+        _posting("c.com", "onsite"),
+        _posting("d.com", "remote", employment_type="other"),
+    ])
+    result = runner.invoke(app, ["run", "--role", "Backend Engineer", "--sector", "fintech",
+                                 "--work-mode", "remote", "--dry-run"])
+    assert result.exit_code == 0
+    assert ("Dry run: 2 companies matched. A full run would use up to 2 enrichment + "
+            "2 contact-search + 6 LinkedIn-lookup credits (10 total); 0 remain.") in result.output
+
+
+def test_dry_run_without_work_mode_keeps_every_mode(monkeypatch):
+    _fake_adapters(monkeypatch)
+    _fake_postings(monkeypatch, [_posting("a.com", "onsite"), _posting("b.com", "hybrid")])
+    result = runner.invoke(app, ["run", "--role", "Backend Engineer", "--sector", "fintech",
+                                 "--dry-run"])
+    assert "2 companies matched" in result.output
+
+
+def test_dry_run_charges_no_linkedin_lookups_when_disabled(monkeypatch, tmp_path):
+    _fake_adapters(monkeypatch)
+    _fake_postings(monkeypatch, [_posting("a.com"), _posting("b.com")])
+    config = tmp_path / "config.toml"
+    config.write_text(config.read_text(encoding="utf-8")
+                      + "\n[hunter]\nlinkedin_lookup = false\n", encoding="utf-8")
+    result = runner.invoke(app, ["run", "--role", "Backend Engineer", "--sector", "fintech",
+                                 "--dry-run"])
+    assert "0 LinkedIn-lookup credits (4 total)" in result.output
 
 
 def test_dry_run_guards_remaining_credits_and_reports_incomplete_estimate(monkeypatch):
@@ -151,3 +240,23 @@ def test_report_command_rejects_an_unknown_run(monkeypatch):
     result = runner.invoke(app, ["report", "99"])
     assert result.exit_code == 1
     assert "No run with id 99" in result.output
+
+
+def test_real_adapters_build_one_source_per_configured_board(monkeypatch, tmp_path):
+    """Construction only -- no request is made, so this touches no network.
+    A board with an empty token list is left out rather than built to search
+    nothing."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setenv("HUNTER_API_KEY", "test")
+    monkeypatch.delenv("OUTREACH_FAKE_ADAPTERS", raising=False)
+    config = tmp_path / "config.toml"
+    config.write_text(config.read_text(encoding="utf-8").replace(
+        "greenhouse_tokens = []",
+        'greenhouse_tokens = ["g"]\nlever_tokens = ["l1", "l2"]'), encoding="utf-8")
+
+    from outreach.cli import build_context
+    ctx = build_context()
+
+    assert [type(s).__name__ for s in ctx.job_board.sources] == [
+        "GreenhouseBoardSource", "LeverBoardSource"]
+    assert ctx.job_board.sources[1].tokens == ("l1", "l2")
