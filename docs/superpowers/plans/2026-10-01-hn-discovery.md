@@ -105,7 +105,18 @@ The runner merges HN postings with config-token postings before the existing dis
   - `parse_post(html: str) -> ParsedPost | None`: the deterministic parse described in spec step 3.
   - `validate_llm_post(candidate: ParsedPost, html: str) -> ParsedPost | None`: the checks in spec step 4. A company or role longer than 120 characters is rejected. The returned post has `domain` canonicalized.
   - `hint_signals(text: str, posted_at: date) -> list[EvidenceItem]`: one `EvidenceItem(None, 0, 0, "", sentence, SourceClass.HN_POST, "news.ycombinator.com", posted_at, theme)` for each sentence where `parse_round` matches (theme `funding-round`) or `parse_headcount_statement` matches (theme `headcount-statement`).
-- Location rule for `|` segments: a segment is a location when it is not the company (index 0), not a role match, and not purely a work-mode, employment or salary segment. A salary segment matches `[$€£]|\d\s*k\b`. The role is the first segment after the company that isn't location-like, work-mode, employment or salary. A segment is location-like when `matches_region`'s markers (US, a state code or a country) or a known city word appear in it. When no segment qualifies as the role, the role is the second segment.
+- Segment rule for the first line split on `|` (segments stripped; index 0 is the company):
+  1. Drop the noise segments from the rest:
+     - work-mode-only segments: only the words remote, onsite, on-site, hybrid, in office, plus separators;
+     - employment-only segments: full-time, part-time, contract, intern, internship;
+     - salary segments, matching `[$€£]|\d\s*k\b`.
+  2. Of what remains, a segment is **location-like** when any of these holds:
+     - `sources.jobboards.region.matches_region(seg, "US")` is true (that module is pure regex, so importing it from `core/` is allowed);
+     - it contains a `_NON_US_MARKERS` word;
+     - it contains "remote".
+  3. `location` is the first location-like segment, or `""` when there is none. `role` is the first segment that isn't location-like, or `""` when there is none.
+  4. Work mode and employment are classified over the whole first line with `classify_work_mode(location, role, first_line)` and `classify_employment(role, first_line)`.
+  5. **Parsed** requires the company, the domain, a non-empty role, and a location or a non-`unknown` work mode.
 
 - [ ] **Step 1: Write failing tests.** Inline post HTML strings in the test file, modelled on the real thread format.
 
@@ -248,7 +259,7 @@ def test_hint_signals_find_round_and_headcount():
 ### Task 5: Store v3 and the discovery orchestrator
 
 **Files:**
-- Modify: `src/outreach/store/migrations.py`, `src/outreach/store/runs.py`, `src/outreach/store/dimensions.py`
+- Modify: `src/outreach/store/migrations.py`, `src/outreach/store/runs.py`, `src/outreach/store/dimensions.py`, `src/outreach/types.py`, `src/outreach/pipeline/runner.py` (RunSummary fields only), `src/outreach/pipeline/context.py`, `tests/pipeline/factories.py`
 - Create: `src/outreach/pipeline/discovery.py`
 - Test: `tests/store/test_db.py`, `tests/store/test_runs.py`, `tests/pipeline/test_discovery.py` (new)
 
@@ -262,7 +273,7 @@ def test_hint_signals_find_round_and_headcount():
   - `CompanyRepo.find(domain: str) -> Company | None`, which canonicalizes first.
 - Produces (`pipeline/discovery.py`):
   - `@dataclass(frozen=True) HNCandidate(post: HNPost, parsed: ParsedPost, method: str, stage_hint: StageResult, headcount_hint: int | None)`
-  - `@dataclass HNSelection(thread: HNThread | None, kept: list[HNCandidate], skipped_recent: list[HNCandidate], skipped_cap: list[HNCandidate], needs_llm: int = 0)`
+  - `@dataclass HNSelection(thread: HNThread | None, kept: list[HNCandidate], known: list[HNCandidate], skipped_recent: list[HNCandidate], skipped_cap: list[HNCandidate], needs_llm: int = 0)`. Here `known` holds the candidates whose domain is already in `known_domains`. They are not ranked, capped or counted in `hn_kept`.
   - `select_hn_candidates(ctx: RunContext, run_id: int, terms: Sequence[str], work_modes: frozenset[WorkMode], known_domains: frozenset[str], summary: RunSummary, allow_llm: bool = True) -> HNSelection`
 
 `select_hn_candidates` behaviour, in order:
@@ -274,7 +285,7 @@ def test_hint_signals_find_round_and_headcount():
    - if not `allow_llm`, count `needs_llm`.
 5. Drop any candidate where `matches_region(location, config.discovery.region)` is false or `posting_matches(PostingRef(...), work_modes)` is false, counting `hn_filtered`.
 6. Dedupe by domain, first post wins.
-7. A domain in `known_domains` is kept but not ranked or capped.
+7. A domain in `known_domains` goes to `known`. It is not ranked, recency-checked or capped.
 8. `stage_hint = classify_stage(None, hint_signals(text, posted_at.date()), ctx.today, ctx.config.stage)`. `headcount_hint` is the maximum of `parse_headcount_statement` over the text.
 9. Sort by `(stage_sort_key(stage_hint.stage, headcount_hint), thread order)`.
 10. A company with `CompanyRepo.find(domain)` set and `researched_since(id, now - recheck_days, run_id)` goes to `skipped_recent`.
