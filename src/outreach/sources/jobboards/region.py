@@ -10,6 +10,14 @@ from typing import Sequence
 # Tel Aviv "IL") and a false accept would defeat V1's US-only scoping.
 _US_MARKERS = (
     "united states", "usa", "u.s.", "remote - us", "remote (us", "us remote",
+    "us-remote", "remote us", "us only", "us-only",
+    # Major US hubs as people write them without a state code ("NYC",
+    # "SF Bay Area") -- common in free-text HN posts. Non-US markers are
+    # still checked first, so "London" can never be read as US.
+    "nyc", "new york", "brooklyn", "manhattan", "san francisco", "sf",
+    "bay area", "silicon valley", "palo alto", "mountain view", "seattle",
+    "boston", "austin", "los angeles", "chicago", "denver", "atlanta", "miami",
+    "washington, dc", "washington dc",
 )
 
 # Recognized non-US markers. Checked before the trailing state-code check
