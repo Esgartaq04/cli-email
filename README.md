@@ -190,6 +190,9 @@ changing report formatting, or to regenerate a report you deleted.
   correct `enrichment_cost` / `finder_cost` in `[hunter]` if they differ.
 - A company's enrichment facts are cached for `facts_ttl_days` (90), so
   re-running within that window doesn't re-charge for them.
+- LinkedIn lookups are bought only with the credits left after every
+  company's contact search, highest-priority company first, so a short
+  balance costs profile links rather than contacts.
 - A failed LinkedIn lookup is re-attempted, and re-charged, on later runs.
 - GitHub's unauthenticated API allows 60 requests per hour, so on a large run
   the repository evidence thins out once that is used up.

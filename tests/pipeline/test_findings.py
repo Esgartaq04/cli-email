@@ -7,7 +7,7 @@ from outreach.llm.base import RawClaim
 from outreach.llm.fake import FakeLLM
 from outreach.net.fetcher import FetchOutcome
 from outreach.pipeline.runner import run_pipeline
-from outreach.types import CompanyFacts, Stage
+from outreach.types import CompanyFacts, PersonRef, Stage
 from tests.pipeline.factories import build_context, company_id
 
 # Quotes that exist verbatim on good.example's fixture pages (see factories).
@@ -211,14 +211,50 @@ def test_linkedin_lookup_respects_the_config_switch_and_budget():
     assert ctx.runs.stage_status(s.run_id, good, "contacts") == "ok"
     assert [c.profile_url for c in ctx.contacts.for_company(good)] == [None]
 
-    # Each lookup costs `finder_cost`: at 2 it takes the last two credits,
-    # so the next company's contact search cannot be paid for.
+    # Each lookup costs `finder_cost`, and only credits left after every
+    # contact search buy one: two enrichments and two searches out of five
+    # leave one credit, too few for a lookup at 2...
     ctx = _with_hunter(_with_profiles(build_context(), {"Marisol Okonkwo": MARISOL_URL},
                                       credits=5), finder_cost=2)
     s = run_pipeline(ctx, "Backend Engineer", "fintech")
-    assert ctx.contact_provider.profile_calls == ["Marisol Okonkwo"]
+    assert ctx.contact_provider.profile_calls == []
     assert ctx.runs.stage_status(s.run_id, company_id(ctx, "thin.example"),
-                                 "contacts") == "skipped_quota"
+                                 "contacts") == "ok"
+
+    # ...while six leave exactly one lookup's worth.
+    ctx = _with_hunter(_with_profiles(build_context(), {"Marisol Okonkwo": MARISOL_URL},
+                                      credits=6), finder_cost=2)
+    run_pipeline(ctx, "Backend Engineer", "fintech")
+    assert ctx.contact_provider.profile_calls == ["Marisol Okonkwo"]
+
+
+def test_every_contact_search_is_paid_for_before_any_linkedin_lookup():
+    """Lookups are extras: one company's three of them must not cost the next
+    company its contact search. Five credits buy two enrichments and both
+    searches, and the one left over goes to the growth company's first
+    contact."""
+    thin_people = ["Tomas Reyes", "Ana Lima", "Bo Chen"]
+    ctx = _with_profiles(build_context(facts={
+        "thin.example": CompanyFacts(120, "51-200", 2019, (), (), "hunter"),
+        "good.example": CompanyFacts(20, "11-50", 2023, (), (), "hunter"),
+    }), {name: f"https://www.linkedin.com/in/{name.split()[0].lower()}"
+         for name in thin_people + ["Marisol Okonkwo"]}, credits=5)
+    ctx.contact_provider._people["thin.example"] = [
+        PersonRef(name, title, None, f"{name.split()[0].lower()}@thin.example", "unverified")
+        for name, title in zip(thin_people, ["Head of Engineering", "Engineering Manager",
+                                             "VP Engineering"])]
+    s = run_pipeline(ctx, "Backend Engineer", "fintech")
+
+    good, thin = company_id(ctx, "good.example"), company_id(ctx, "thin.example")
+    assert ctx.contact_provider.find_calls == ["thin.example", "good.example"]
+    assert ctx.runs.stage_status(s.run_id, thin, "contacts") == "ok"
+    assert ctx.runs.stage_status(s.run_id, good, "contacts") == "ok"
+    assert len(ctx.contact_provider.profile_calls) == 1
+    assert ctx.contact_provider.profile_calls[0] in thin_people
+    # The profile it bought is stored on that contact; the rest wait.
+    linked = [c.full_name for c in ctx.contacts.for_company(thin) if c.profile_url]
+    assert linked == ctx.contact_provider.profile_calls
+    assert [c.profile_url for c in ctx.contacts.for_company(good)] == [None]
 
 
 def test_a_single_token_name_is_not_looked_up():

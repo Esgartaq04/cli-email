@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from typing import Sequence
 
@@ -223,6 +223,13 @@ def run_pipeline(
             summary.errors.append(f"evidence {company_id}: {exc}")
             ctx.runs.set_stage(run_id, company_id, "evidence", "failed", error=str(exc))
 
+    # --- late size check (per company, isolated) ------------------------
+    # A homepage that bot-blocks us skips enrichment, so the size cap was
+    # never checked -- and the large companies are the ones that block. If
+    # research then reached the domain anyway, it is confirmed for contacts,
+    # so it must clear the same size check before a contact credit is spent.
+    research_ids = _size_check_late_confirmed(ctx, run_id, research_ids, budget, summary)
+
     # --- classify (per company, isolated; not a checkpoint) -------------
     # A pure function of the stored facts and evidence, so it is simply
     # recomputed on every run and resume: skipping it on resume would leave
@@ -261,13 +268,7 @@ def run_pipeline(
                      if ctx.runs.stage_status(run_id, c, "contacts") != "ok"]
     pending = []
     for company_id in still_pending:
-        # A job-posting page is usually hosted by the job board, not the
-        # company, and GitHub repos are read from api.github.com, so reaching
-        # either says nothing about the guessed domain. The enrich stage's
-        # homepage fetch does count: it is the domain.
-        confirmed = any(a.outcome == "ok" and a.source_class not in _OFF_DOMAIN_CLASSES
-                        for a in ctx.fetch_attempts.for_company(run_id, company_id))
-        if confirmed:
+        if _domain_confirmed(ctx, run_id, company_id):
             pending.append(company_id)
         else:
             try:
@@ -282,6 +283,11 @@ def run_pipeline(
     # over the same companies spend the same way.
     unclassified = stage_sort_key(Stage.UNKNOWN, None)
     pending.sort(key=lambda c: (contact_priority.get(c, unclassified), c))
+    # Two passes over the same order. Every company's contact search is paid
+    # for first; LinkedIn lookups only get what is left. A lookup is an extra
+    # on a contact we already have, and buying company A's three of them
+    # must never leave company B with no contacts at all.
+    found: list[tuple[int, list[PersonRef]]] = []
     for company_id in pending:
         if credit_error is not None:
             # We never learned the balance: an outage, not a shortfall.
@@ -304,12 +310,25 @@ def run_pipeline(
             summary.skipped_quota += 1
             continue
         try:
-            _resolve_contacts(ctx, company_id, role_title, budget, summary)
+            unlinked = _resolve_contacts(ctx, company_id, role_title)
             ctx.runs.set_stage(run_id, company_id, "contacts", "ok")
         except Exception as exc:
             summary.failures += 1
             summary.errors.append(f"contacts {company_id}: {exc}")
             ctx.runs.set_stage(run_id, company_id, "contacts", "failed", error=str(exc))
+            continue
+        found.append((company_id, unlinked))
+    # Only companies searched in THIS invocation: a resume that skipped a
+    # company's `contacts: ok` step must not buy its lookups a second time.
+    # A crash between the passes loses that run's lookups, which is the
+    # cheap direction -- the next run looks up any profile still missing.
+    for company_id, unlinked in found:
+        try:
+            _link_profiles(ctx, company_id, unlinked, budget, summary)
+        except Exception as exc:
+            # The contacts are stored and the stage is done; a profile link
+            # that failed to save is this company's loss, not the run's.
+            summary.errors.append(f"linkedin {company_id}: {exc}")
 
     try:
         summary.credits_after = ctx.contact_provider.remaining_credits()
@@ -439,6 +458,52 @@ def _company_facts(ctx: RunContext, company: Company, budget: CreditBudget,
         ctx.companies.set_facts(company.id, facts, stamp)
     summary.facts_fetched += 1
     return "ok", None
+
+
+def _domain_confirmed(ctx: RunContext, run_id: int, company_id: int) -> bool:
+    """Whether any fetch this run actually reached the company's own domain.
+
+    A job-posting page is usually hosted by the job board, not the company,
+    and GitHub repos are read from api.github.com, so reaching either says
+    nothing about the guessed domain. The enrich stage's homepage fetch does
+    count: it is the domain.
+    """
+    return any(a.outcome == "ok" and a.source_class not in _OFF_DOMAIN_CLASSES
+               for a in ctx.fetch_attempts.for_company(run_id, company_id))
+
+
+def _size_check_late_confirmed(ctx: RunContext, run_id: int, research_ids: list[int],
+                               budget: CreditBudget, summary: RunSummary) -> list[int]:
+    """Enrich the companies research confirmed after their homepage failed.
+
+    Returns the companies still in the run. One whose facts now put it over
+    the cap is excluded exactly as the enrich stage would have: recorded as
+    `excluded_size`, and dropped from classification, contacts and
+    synthesis. The facts purchase follows the enrich stage's own budget and
+    TTL rules, so a resume inside the TTL does not pay for them again.
+    """
+    kept: list[int] = []
+    for company_id in research_ids:
+        try:
+            if (ctx.runs.stage_status(run_id, company_id, "enrich")
+                    == "skipped_domain_unconfirmed"
+                    and _domain_confirmed(ctx, run_id, company_id)):
+                status, error = _company_facts(ctx, ctx.companies.get(company_id),
+                                               budget, summary)
+                company = ctx.companies.get(company_id)
+                if exceeds_cap(company.headcount, company.headcount_band,
+                               ctx.config.discovery.headcount_max):
+                    status, error = "excluded_size", None
+                ctx.runs.set_stage(run_id, company_id, "enrich", status, error=error)
+                if status == "excluded_size":
+                    summary.excluded_size += 1
+                    continue
+        except Exception as exc:
+            # As in the enrich stage: a size we failed to learn is unknown,
+            # and unknown never drops a company.
+            summary.errors.append(f"enrich {company_id}: {exc}")
+        kept.append(company_id)
+    return kept
 
 
 @dataclass(frozen=True)
@@ -720,9 +785,15 @@ def facts_of(company: Company) -> CompanyFacts | None:
                         company.headcount_source or "hunter")
 
 
-def _resolve_contacts(ctx: RunContext, company_id: int, role_title: str,
-                      budget: CreditBudget, summary: RunSummary) -> None:
+def _resolve_contacts(ctx: RunContext, company_id: int,
+                      role_title: str) -> list[PersonRef]:
+    """Store the company's ranked contacts; return the ones with no profile.
+
+    Those are the candidates for a paid LinkedIn lookup, which the caller
+    buys only after every company's contact search (see `_link_profiles`).
+    """
     company = ctx.companies.get(company_id)
+    unlinked: list[PersonRef] = []
     keywords = role_title.lower().split()
     people = ctx.contact_provider.find(company.canonical_domain, keywords)
     for person, _score in rank_contacts(people, company.headcount, keywords,
@@ -752,17 +823,27 @@ def _resolve_contacts(ctx: RunContext, company_id: int, role_title: str,
             # No address to verify at all.
             status, email = "not_found", None
 
-        profile_url = person.profile_url
-        if profile_url is None and (prior is None or prior.profile_url is None):
-            # A profile we already stored is kept by the upsert's COALESCE,
-            # so it is never bought twice.
-            profile_url = _lookup_profile(ctx, company, person.full_name, budget, summary)
-
         resolved = PersonRef(
             full_name=person.full_name, title=person.title,
-            profile_url=profile_url, email=email, email_status=status,
+            profile_url=person.profile_url, email=email, email_status=status,
         )
         ctx.contacts.upsert(company_id, resolved, "provider", datetime.now())
+        if person.profile_url is None and (prior is None or prior.profile_url is None):
+            # A profile we already stored is kept by the upsert's COALESCE,
+            # so it is never bought twice.
+            unlinked.append(resolved)
+    return unlinked
+
+
+def _link_profiles(ctx: RunContext, company_id: int, people: Sequence[PersonRef],
+                   budget: CreditBudget, summary: RunSummary) -> None:
+    """Buy LinkedIn profiles for stored contacts, in rank order, while budget lasts."""
+    company = ctx.companies.get(company_id)
+    for person in people:
+        profile_url = _lookup_profile(ctx, company, person.full_name, budget, summary)
+        if profile_url is not None:
+            ctx.contacts.upsert(company_id, replace(person, profile_url=profile_url),
+                                "provider", datetime.now())
 
 
 def _lookup_profile(ctx: RunContext, company: Company, full_name: str,

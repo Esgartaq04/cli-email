@@ -2,7 +2,7 @@
 from outreach.net.fetcher import FetchOutcome
 from outreach.pipeline.runner import run_pipeline
 from outreach.sources.jobboards.multi import MultiBoardSource
-from outreach.types import CompanyFacts
+from outreach.types import CompanyFacts, Stage
 from tests.pipeline.factories import build_context, company_id
 
 
@@ -145,3 +145,80 @@ def test_board_errors_are_reported_as_discover_errors():
     s = run_pipeline(ctx, "Backend Engineer", "fintech")
     assert "discover: _DownBoard: 503" in s.errors
     assert s.companies == 2  # the healthy board's postings still arrive
+
+
+def _ghost_answers(ctx, home_status: int, blog: bool):
+    """ghost.example's homepage answers with `home_status`; its /blog answers
+    only when `blog`. Everything else falls through to the factory (404)."""
+    real = ctx.fetcher.get
+
+    def get(url):
+        if url == "https://ghost.example/":
+            if home_status != 200:
+                return FetchOutcome(url, home_status, None, "http_error")
+            return FetchOutcome(url, 200, "<html><body>Ghost</body></html>", "ok")
+        if blog and url == "https://ghost.example/blog":
+            return FetchOutcome(url, 200, "<html><body><p>We build ghosts.</p></body></html>",
+                                "ok")
+        return real(url)
+
+    ctx.fetcher.get = get
+
+
+def test_a_homepage_alone_confirms_the_domain_for_contacts():
+    """Every research surface misses; the enrich stage's homepage fetch is
+    the one on-domain answer, and it is enough."""
+    ctx = build_context(include_unconfirmed_domain=True)
+    _ghost_answers(ctx, 200, blog=False)
+    s = run_pipeline(ctx, "Backend Engineer", "fintech")
+    ghost = company_id(ctx, "ghost.example")
+    assert [a.source_class.value for a in ctx.fetch_attempts.for_company(s.run_id, ghost)
+            if a.outcome == "ok"] == ["homepage"]
+    assert ctx.runs.stage_status(s.run_id, ghost, "contacts") == "ok"
+    assert "ghost.example" in ctx.contact_provider.find_calls
+
+
+def test_a_domain_confirmed_after_a_failed_homepage_is_size_checked_before_contacts():
+    """A homepage that bot-blocks us skips enrichment; once /blog confirms
+    the domain, the size check still runs before a contact credit is spent."""
+    ctx = build_context(include_unconfirmed_domain=True, facts={
+        "ghost.example": CompanyFacts(9000, "5001-10000", 2001, (), (), "hunter")})
+    _ghost_answers(ctx, 403, blog=True)
+    s = run_pipeline(ctx, "Backend Engineer", "fintech")
+    ghost = company_id(ctx, "ghost.example")
+    assert ctx.runs.stage_status(s.run_id, ghost, "enrich") == "excluded_size"
+    assert ctx.facts_provider.calls.count("ghost.example") == 1
+    assert ctx.runs.stage_status(s.run_id, ghost, "contacts") is None
+    assert "ghost.example" not in ctx.contact_provider.find_calls
+    assert ctx.runs.company_stage(s.run_id, ghost) is None
+    assert ctx.findings.for_company(s.run_id, ghost) == []
+    assert s.excluded_size == 1
+    assert s.stage_counts == {"unknown": 2}
+
+    # Resuming neither buys the facts again nor reaches contacts.
+    run_pipeline(ctx, "Backend Engineer", "fintech", resume_run_id=s.run_id)
+    assert ctx.facts_provider.calls.count("ghost.example") == 1
+    assert "ghost.example" not in ctx.contact_provider.find_calls
+
+
+def test_a_late_confirmed_company_under_the_cap_is_enriched_and_classified():
+    ctx = build_context(include_unconfirmed_domain=True, facts={
+        "ghost.example": CompanyFacts(120, "51-200", 2019, (), (), "hunter")})
+    _ghost_answers(ctx, 403, blog=True)
+    s = run_pipeline(ctx, "Backend Engineer", "fintech")
+    ghost = company_id(ctx, "ghost.example")
+    assert ctx.runs.stage_status(s.run_id, ghost, "enrich") == "ok"
+    assert ctx.facts_provider.calls.count("ghost.example") == 1
+    assert ctx.runs.company_stage(s.run_id, ghost).stage is Stage.GROWTH
+    assert ctx.runs.stage_status(s.run_id, ghost, "contacts") == "ok"
+    # Growth goes first in the contacts queue.
+    assert ctx.contact_provider.find_calls[0] == "ghost.example"
+
+
+def test_a_domain_nothing_confirmed_still_buys_no_facts():
+    ctx = build_context(include_unconfirmed_domain=True, facts={
+        "ghost.example": CompanyFacts(9000, "5001-10000", 2001, (), (), "hunter")})
+    s = run_pipeline(ctx, "Backend Engineer", "fintech")
+    ghost = company_id(ctx, "ghost.example")
+    assert ctx.runs.stage_status(s.run_id, ghost, "enrich") == "skipped_domain_unconfirmed"
+    assert "ghost.example" not in ctx.facts_provider.calls
