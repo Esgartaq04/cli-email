@@ -80,6 +80,18 @@ class RunSummary:
     wall_clock_seconds: float | None = None
     credits_before: int | None = None
     credits_after: int | None = None
+    # HN "Who is hiring?" funnel. Posts dropped before a company existed are
+    # only ever counted here.
+    hn_thread_title: str | None = None
+    hn_posts_read: int = 0
+    hn_role_matched: int = 0
+    hn_parsed: int = 0
+    hn_llm_parsed: int = 0
+    hn_llm_rejected: int = 0
+    hn_filtered: int = 0
+    hn_skipped_recent: int = 0
+    hn_skipped_cap: int = 0
+    hn_kept: int = 0
 
 
 def run_pipeline(

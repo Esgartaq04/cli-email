@@ -84,7 +84,7 @@ def test_post_text_turns_paragraphs_into_lines():
         "First | line", "Second & more", "Third"]
 
 
-@pytest.mark.parametrize("location", ["NYC", "New York", "SF Bay Area", "San Francisco", "Seattle"])
+@pytest.mark.parametrize("location", ["NYC", "New York", "SF Bay Area", "San Francisco", "Seattle", "US", "Remote, US"])
 def test_common_us_cities_without_a_state_code_count_as_us(location):
     assert matches_region(location, "US")
 

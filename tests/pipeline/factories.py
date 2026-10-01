@@ -19,7 +19,8 @@ from outreach.sources.jobboards.fake import FakeJobBoardSource
 from outreach.store.cache import DocumentCache
 from outreach.store.db import connect
 from outreach.store.dimensions import CompanyRepo, ContactRepo, DocumentRepo
-from outreach.store.runs import (EvidenceRepo, FetchAttemptRepo, FindingRepo,
+from outreach.sources.hn import FakeHNSource
+from outreach.store.runs import (EvidenceRepo, FetchAttemptRepo, FindingRepo, HNPostRepo,
                                  PostingRepo, RunRepo)
 from outreach.types import CompanyFacts, PersonRef, PostingRef
 
@@ -200,6 +201,8 @@ def build_context(
             credits=credits,
         ),
         facts_provider=FakeFactsProvider(facts or {}, fail_on=facts_fail_on),
+        # No thread by default: existing pipeline tests see no HN companies.
+        hn=FakeHNSource(), hn_posts=HNPostRepo(conn),
     )
 
 
@@ -210,3 +213,19 @@ def company_id(ctx: RunContext, domain: str) -> int:
         "SELECT id FROM companies WHERE canonical_domain = ?", (domain,)).fetchone()
     assert row is not None, f"{domain} was never discovered"
     return int(row["id"])
+
+
+def hn_thread(item_ids: list[int] | None = None, extra: list[tuple[int, str]] = ()):
+    """The recorded "Who is hiring?" fixture as an HNThread, optionally only
+    some of its posts (in fixture order) plus extra (item_id, html) posts."""
+    from datetime import datetime, timezone
+
+    from outreach.types import HNPost, HNThread
+    raw = json.loads((Path(__file__).parent.parent / "fixtures" / "hn_thread.json")
+                     .read_text(encoding="utf-8"))
+    posts = [HNPost(c["id"], datetime.fromisoformat(c["created_at"].replace("Z", "+00:00")),
+                    c["text"])
+             for c in raw["children"] if c.get("text")
+             and (item_ids is None or c["id"] in item_ids)]
+    posts += [HNPost(i, datetime(2026, 9, 1, 17, tzinfo=timezone.utc), html) for i, html in extra]
+    return HNThread(raw["id"], raw["title"], tuple(posts))

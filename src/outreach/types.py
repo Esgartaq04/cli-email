@@ -205,3 +205,13 @@ class ParsedPost:
     location: str
     work_mode: WorkMode
     employment_type: EmploymentType
+
+
+@dataclass(frozen=True)
+class HNPostRecord:
+    """The HN post a company came from in one run, and what became of it."""
+    item_id: int
+    thread_title: str
+    posted_at: date
+    parse_method: str  # "parsed" | "llm"
+    status: str  # "kept" | "skipped_cap" | "skipped_recent"

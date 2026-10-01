@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime
 
 from outreach.types import (
     Bottleneck,
     EvidenceItem,
     FetchAttempt,
     Finding,
+    HNPostRecord,
     PostingRef,
     SourceClass,
     Stage,
@@ -70,6 +71,19 @@ class RunRepo:
         self.conn.execute("UPDATE runs SET finished_at = ?, status = 'done' WHERE id = ?",
                           (when.isoformat(), run_id))
         self.conn.commit()
+
+    def researched_since(self, company_id: int, since: datetime,
+                         exclude_run_id: int) -> bool:
+        """Whether another run started at or after `since` finished this
+        company's research. Used to avoid paying twice for a company HN
+        lists every month."""
+        row = self.conn.execute(
+            """SELECT 1 FROM run_companies rc JOIN runs r ON r.id = rc.run_id
+               WHERE rc.company_id = ? AND rc.stage = 'evidence' AND rc.status = 'ok'
+                 AND rc.run_id != ? AND r.started_at >= ?
+               LIMIT 1""",
+            (company_id, exclude_run_id, since.isoformat())).fetchone()
+        return row is not None
 
     def set_stage(self, run_id: int, company_id: int, stage: str,
                   status: str, error: str | None = None) -> None:
@@ -322,3 +336,28 @@ class FetchAttemptRepo:
                          r["outcome"], r["http_status"], r["document_count"])
             for r in rows
         ]
+
+
+class HNPostRepo:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def insert(self, run_id: int, company_id: int, record: HNPostRecord) -> None:
+        # A resume re-runs discovery; the post is the same post.
+        self.conn.execute(
+            """INSERT OR IGNORE INTO run_hn_posts (run_id, company_id, item_id,
+                   thread_title, posted_at, parse_method, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (run_id, company_id, record.item_id, record.thread_title,
+             record.posted_at.isoformat(), record.parse_method, record.status))
+        self.conn.commit()
+
+    def for_company(self, run_id: int, company_id: int) -> HNPostRecord | None:
+        row = self.conn.execute(
+            "SELECT * FROM run_hn_posts WHERE run_id = ? AND company_id = ? "
+            "ORDER BY id LIMIT 1", (run_id, company_id)).fetchone()
+        if row is None:
+            return None
+        return HNPostRecord(int(row["item_id"]), row["thread_title"],
+                            date.fromisoformat(row["posted_at"]), row["parse_method"],
+                            row["status"])

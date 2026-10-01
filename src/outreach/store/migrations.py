@@ -7,7 +7,7 @@ import sqlite3
 # IF NOT EXISTS, and everything after v1 layers on here. That is what lets a
 # fresh database and the user's existing data/pipeline.db (contact history
 # included) take the same path -- both report user_version 0 after schema.sql
-# runs, and both come out the other side at 2.
+# runs, and both come out the other side at the latest version.
 #
 # Each script carries its own BEGIN/COMMIT and sets user_version as its last
 # statement, so a crash mid-migration rolls back the added columns together
@@ -69,6 +69,27 @@ MIGRATIONS: tuple[str, ...] = (
     );
 
     PRAGMA user_version = 2;
+    COMMIT;
+    """,
+    # v3: the HN "Who is hiring?" post each company was found through, and
+    # what became of it this run. Posts dropped before a company existed are
+    # only counted on the run summary.
+    """
+    BEGIN;
+
+    CREATE TABLE run_hn_posts (
+      id INTEGER PRIMARY KEY,
+      run_id INTEGER NOT NULL REFERENCES runs(id),
+      company_id INTEGER NOT NULL REFERENCES companies(id),
+      item_id INTEGER NOT NULL,
+      thread_title TEXT NOT NULL,
+      posted_at TEXT NOT NULL,
+      parse_method TEXT NOT NULL CHECK (parse_method IN ('parsed', 'llm')),
+      status TEXT NOT NULL CHECK (status IN ('kept', 'skipped_cap', 'skipped_recent')),
+      UNIQUE (run_id, item_id)
+    );
+
+    PRAGMA user_version = 3;
     COMMIT;
     """,
 )

@@ -264,3 +264,48 @@ def test_run_window_is_open_until_the_run_finishes(tmp_path):
     assert runs.window(rid) == (datetime(2026, 9, 21, 9), None)
     runs.finish(rid, datetime(2026, 9, 21, 10))
     assert runs.window(rid) == (datetime(2026, 9, 21, 9), datetime(2026, 9, 21, 10))
+
+
+def _hn_db(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    return conn, CompanyRepo(conn), RunRepo(conn)
+
+
+def test_hn_post_record_round_trips_and_dedupes(tmp_path):
+    from datetime import date
+    from outreach.store.runs import HNPostRepo
+    from outreach.types import HNPostRecord
+    conn, companies, runs = _hn_db(tmp_path)
+    cid = companies.upsert("acme.io", "Acme", None, None)
+    run = runs.create("r", "s", "US", (1, 2000), datetime(2026, 9, 30))
+    repo = HNPostRepo(conn)
+    record = HNPostRecord(101, "Ask HN: Who is hiring? (September 2026)", date(2026, 9, 1),
+                          "parsed", "kept")
+    repo.insert(run, cid, record)
+    repo.insert(run, cid, record)
+    assert repo.for_company(run, cid) == record
+    assert conn.execute("SELECT COUNT(*) FROM run_hn_posts").fetchone()[0] == 1
+    assert repo.for_company(run, 999) is None
+
+
+def test_researched_since_ignores_this_run_and_old_runs(tmp_path):
+    conn, companies, runs = _hn_db(tmp_path)
+    cid = companies.upsert("acme.io", "Acme", None, None)
+    old = runs.create("r", "s", "US", (1, 2000), datetime(2026, 8, 1))
+    runs.set_stage(old, cid, "evidence", "ok")
+    current = runs.create("r", "s", "US", (1, 2000), datetime(2026, 9, 30))
+    runs.set_stage(current, cid, "evidence", "ok")
+    since = datetime(2026, 8, 31)
+    assert runs.researched_since(cid, since, exclude_run_id=current) is False
+    recent = runs.create("r", "s", "US", (1, 2000), datetime(2026, 9, 15))
+    runs.set_stage(recent, cid, "evidence", "failed")
+    assert runs.researched_since(cid, since, exclude_run_id=current) is False
+    runs.set_stage(recent, cid, "evidence", "ok")
+    assert runs.researched_since(cid, since, exclude_run_id=current) is True
+
+
+def test_company_find_canonicalizes(tmp_path):
+    conn, companies, runs = _hn_db(tmp_path)
+    cid = companies.upsert("acme.io", "Acme", None, None)
+    assert companies.find("https://www.Acme.io/careers").id == cid
+    assert companies.find("other.io") is None

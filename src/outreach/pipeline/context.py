@@ -9,10 +9,11 @@ from outreach.contacts.facts import CompanyFactsProvider
 from outreach.llm.base import LLMClient
 from outreach.net.fetcher import Fetcher
 from outreach.sources.base import JobBoardSource
+from outreach.sources.hn import HNSource
 from outreach.store.cache import DocumentCache
 from outreach.store.dimensions import CompanyRepo, ContactRepo, DocumentRepo
-from outreach.store.runs import (EvidenceRepo, FetchAttemptRepo, FindingRepo, PostingRepo,
-                                 RunRepo)
+from outreach.store.runs import (EvidenceRepo, FetchAttemptRepo, FindingRepo, HNPostRepo,
+                                 PostingRepo, RunRepo)
 
 
 @dataclass
@@ -40,3 +41,6 @@ class RunContext:
     job_board: JobBoardSource
     contact_provider: ContactProvider
     facts_provider: CompanyFactsProvider
+    # HN discovery. None means no HN source at all (discovery is skipped).
+    hn: HNSource | None = None
+    hn_posts: HNPostRepo | None = None
