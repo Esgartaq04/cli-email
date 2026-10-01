@@ -60,3 +60,37 @@ def test_the_summary_prompt_is_about_what_they_are_building():
     _llm('{"summary": "They are building a thing."}', seen).write_summary(
         "claim", ["quote"])
     assert "what a company is building" in seen["body"]["system"]
+
+
+def _post_reply(**overrides) -> str:
+    reply = {"company": "Acme", "domain": "acme.io", "ats_kind": "lever", "ats_token": "acme",
+             "role": "Backend Engineer", "location": "Austin, TX", "work_mode": "remote",
+             "employment_type": "full_time"}
+    reply.update(overrides)
+    return json.dumps(reply)
+
+
+def test_parse_job_post_maps_json():
+    seen: dict = {}
+    from outreach.types import ParsedPost
+    post = _llm(_post_reply(), seen).parse_job_post("Acme is hiring...")
+    assert post == ParsedPost("Acme", "acme.io", ("lever", "acme"), "Backend Engineer",
+                              "Austin, TX", "remote", "full_time")
+    assert "Who is hiring?" in seen["body"]["system"]
+    assert "never infer" in seen["body"]["system"]
+
+
+def test_parse_job_post_null_is_none():
+    assert _llm("null").parse_job_post("not a job post") is None
+    assert _llm("[]").parse_job_post("not a job post") is None
+
+
+def test_parse_job_post_unknown_mode_is_unknown():
+    post = _llm(_post_reply(work_mode="sometimes", employment_type="gig",
+                            ats_kind=None, ats_token=None)).parse_job_post("x")
+    assert (post.work_mode, post.employment_type, post.ats) == ("unknown", "unknown", None)
+
+
+def test_parse_job_post_without_company_or_domain_is_none():
+    assert _llm(_post_reply(company=None)).parse_job_post("x") is None
+    assert _llm(_post_reply(domain="")).parse_job_post("x") is None
