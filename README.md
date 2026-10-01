@@ -27,7 +27,11 @@ The first rule that matches wins; funding beats headcount.
 | unknown | Nothing found to classify it by |
 
 Headcount, funding rounds and founding year come from Hunter's Company
-Enrichment; quotes found in press and about pages fill the gaps.
+Enrichment; quotes found in press and about pages fill the gaps. Quotes from
+pages that describe the company *today* (careers, about, job postings) can't
+date a funding round or count as a recent expansion signal, since their only
+date is the day they were fetched. Any IPO or acquisition among the known
+rounds makes a company mature, whatever came after it.
 
 ## Install
 
@@ -164,8 +168,9 @@ Options:
   LinkedIn-lookup credits (60 total); 80 remain.` Companies are counted after
   the `--work-mode` filter. The LinkedIn figure is companies x
   `max_contacts_per_company` x `finder_cost`, or 0 with
-  `linkedin_lookup = false`. These are upper bounds. Nothing is spent and no
-  report is written. If the balance can't be fetched the estimate is still
+  `linkedin_lookup = false`. These are upper bounds. No Hunter credits are
+  spent and no report is written; the only paid call is one Anthropic request
+  that expands the role title into search terms. If the balance can't be fetched the estimate is still
   printed, marked as unchecked, with a non-zero exit status.
 - `--resume RUN_ID` — resume a previously interrupted run by its id instead
   of starting a new one. Work already checkpointed for a stage is not
@@ -179,7 +184,10 @@ outreach report 3
 
 Re-renders a completed run's HTML report from what is already stored in the
 database, without touching any adapter or spending any credits. Useful after
-changing report formatting, or to regenerate a report you deleted.
+changing report formatting, or to regenerate a report you deleted. Runs made
+before the stage-targeting change (schema v1) can't be re-rendered in the new
+layout; the command says so and exits non-zero — their original HTML files in
+`reports/` are the record.
 
 ## Credit costs and limits
 
@@ -207,4 +215,22 @@ size cap, or no posting in the requested work mode), then run diagnostics.
 Every quote links back to the source page it was extracted from. A contact's
 email address is shown only when Hunter's verifier confirmed it as
 deliverable — an unverified or not-found address is never printed as though it
-were a working one — and a LinkedIn link appears only when a lookup found one.
+were a working one. A **LinkedIn** link appears only when a profile was found;
+otherwise the contact gets a clearly labelled **Search LinkedIn** link (a
+people search for the name and company), which is never stored or presented as
+a found profile.
+
+Under each company, **Hooks for a build** lists the public GitHub repositories
+this run saw recently pushed and the company's developer docs (the first of
+`/docs`, `/developers`, `/api` that answered) — raw material if you'd rather build
+something for a company than write to it.
+
+## Tests
+
+```bash
+.venv/Scripts/python -m pytest -q    # Windows; .venv/bin/python on macOS/Linux
+```
+
+Every test runs against fakes and recorded fixtures; none touches a live API or
+your `.env`. The CLI tests patch out `.env` loading and run in a scratch
+directory, so they never see your real keys, config or database.

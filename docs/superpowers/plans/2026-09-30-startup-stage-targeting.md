@@ -1,5 +1,7 @@
 # Startup-Stage Targeting Implementation Plan
 
+> **Status:** Executed (subagent-driven, per-task reviews + whole-branch review); merged to `main` in PR #2. Departures are recorded in the spec's **As built** section.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Retarget the outreach pipeline at ≤2,000-employee startups: filter postings by work mode and full-time, enrich companies with Hunter facts, classify startup stage deterministically, research "what they're building" instead of bottlenecks, and find LinkedIn profiles for contacts.

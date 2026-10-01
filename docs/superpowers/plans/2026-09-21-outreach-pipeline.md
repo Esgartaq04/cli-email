@@ -1,5 +1,7 @@
 # Outreach Research Pipeline V1 Implementation Plan
 
+> **Status:** Executed; merged to `main` in PR #1.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a local CLI that takes a job title, sector and headcount band, and produces one self-contained HTML report listing companies, ranked contacts, and evidence-backed bottlenecks.

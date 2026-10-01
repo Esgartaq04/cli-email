@@ -1,6 +1,7 @@
 # Spec A — Startup-Stage Targeting & "What They're Building" Research
 
 **Date:** 2026-09-30 · **Branch:** `feat/v1-pipeline` · **Supersedes parts of:** `docs/superpowers/specs/2026-09-21-outreach-pipeline-design.md`
+**Status:** Implemented — merged to `main` in PR #2 (2026-10-01). See **As built** at the end for where the code departs from the text below.
 **Follow-up (separate spec, not in scope here):** Spec B — auto-discovery from HN "Who is hiring?" threads feeding Greenhouse/Ashby/Lever tokens into this pipeline.
 
 ## Context
@@ -111,3 +112,33 @@ TDD. **No test touches a live API; I will not run the live pipeline** (user's st
 
 1. User reviews this spec.
 2. Invoke `superpowers:writing-plans` for the implementation plan; user picks execution method.
+
+## As built
+
+Decisions taken during implementation (per-task and whole-branch reviews), recorded here because the execution ledger was deleted after merge.
+
+**Departures from the text above**
+
+- **Stage storage.** `run_companies.stage` already meant *pipeline step*, so the startup stage lives in its own table, `run_company_stages(run_id, company_id, stage, reasons)`.
+- **Contacts spend in two passes.** First every pending company's domain search + verify (1 credit each, stage order), then LinkedIn lookups with whatever credit is left (stage order). A short balance costs profile links, never a company's contacts.
+- **Fetch-dated pages never date a signal.** Careers, about and job-posting pages carry the fetch date as `published_at`; `core/stage.py` treats their funding/expansion quotes as undated, so "we raised our seed round" on an About page can't masquerade as a fresh round or a recent expansion.
+- **Exits are sticky.** Any IPO or acquisition among a company's rounds means Maturity, not just the latest round. Hunter's `type: "public"` / `ticker` and structured round labels ("IPO", "Post-IPO Equity", "Acquired", "M&A") count; prose only counts completed IPOs ("went public", "began trading on"), never "planned IPO".
+- **Late size check.** A company whose homepage failed (so enrichment was skipped) but which a later on-domain surface confirmed is size-checked before contacts; over the cap ⇒ `excluded_size`, no contacts.
+- **Domain confirmation.** Neither job-posting pages nor GitHub API fetches confirm a company's domain (both are off-domain). The HOMEPAGE fetch attempt survives evidence-stage resets because it *is* the confirmation record.
+- **Size cap uses the band's lower bound** even when an exact count is present (a "1001-5000" company with ~3,000 people is kept) — "drop only when known to exceed".
+- **Press reads only its own section** (`/news/...`), never blog posts linked from a press index — otherwise one post would count as two independent sources.
+- **Repo hooks are run-scoped**: GitHub documents fetched inside this run's window; `DocumentRepo.insert` refreshes `published_at`/`fetched_at` on re-fetch.
+- **Secrets and links.** Hunter HTTP errors name only the endpoint and status (the API key travels in the query string and error text reaches the report). Third-party URLs become links only for `http(s)`; LinkedIn URLs must be `*.linkedin.com` and are rebuilt from validated parts.
+- **Work mode / employment.** "5 days a week in the office" ⇒ onsite (1–4 days ⇒ hybrid). Only explicit contract markers ("(Contract)", "- Contract", trailing "Contractor", "Contract-to-hire") drop a posting; "Smart Contract Engineer" is kept.
+- **Facts cache** is stamped with the run date; a Hunter record without a headcount never erases a known one; a structured Hunter "Seed" label parses as seed.
+
+**Known gaps, deferred**
+
+- A LinkedIn lookup that finds nothing isn't remembered, so later runs re-pay for it (bounded: lookups only use leftover credit). Fix needs a `contacts.profile_checked_at` column.
+- GitHub org detection takes the first GitHub link on the homepage (`github.com/facebook/react` ⇒ `facebook`).
+- Diagnostics label the whole Hunter search balance as "enrichment credits" and don't show the in-run spend by bucket.
+- A card can show a band-midpoint headcount (e.g. ~3000) above the "≤ 2,000" header.
+- Evidence and "pages read" links don't use the `http(s)`-only guard (they come from company domains / GitHub).
+- A credit-check outage marks enrich rows `skipped_quota` with no error text; dry run exits 0 with "0 companies" when every board failed.
+- Hunter's credit bucket for Company Enrichment and Email Finder is undocumented; `[hunter] enrichment_cost` / `finder_cost` default to 1 and should be checked against the account page after the first live run.
+- GitHub's unauthenticated API limit (60/hour) thins repo evidence on large runs.
