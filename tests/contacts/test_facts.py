@@ -10,9 +10,11 @@ from pathlib import Path
 import httpx
 import pytest
 
+from outreach.config import StageConfig
 from outreach.contacts.hunter import HunterAPIError
 from outreach.contacts.facts import FakeFactsProvider, HunterFactsProvider, parse_band
-from outreach.types import CompanyFacts, FundingRound
+from outreach.core.stage import classify_stage
+from outreach.types import CompanyFacts, FundingRound, Stage
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "hunter_company.json"
 
@@ -137,3 +139,33 @@ def test_a_public_company_carries_an_ipo_round(data):
 def test_a_private_or_unlisted_company_carries_no_ipo_round(data):
     f = _serving({"data": data}).company_facts("x.com")
     assert all(r.kind != "ipo" for r in f.funding_rounds)
+
+
+def _rounds_for(label: str):
+    return _serving({"data": {"fundingRounds": [{"type": label, "date": "2021-05-01"}]}}
+                    ).company_facts("x.com").funding_rounds
+
+
+@pytest.mark.parametrize("label,kind", [
+    ("IPO", "ipo"), ("ipo", "ipo"), ("Post-IPO Equity", "ipo"), ("post_ipo_equity", "ipo"),
+    ("Initial Public Offering", "ipo"),
+    ("Acquired", "acquired"), ("Acquisition", "acquired"), ("M&A", "acquired"),
+    ("Merger", "acquired"), ("Mergers and Acquisitions", "acquired"),
+    ("Series B", "series_b"),
+])
+def test_structured_round_labels_map_to_their_kind(label, kind):
+    """Hunter's round label is a category, not prose: "IPO" alone is a
+    listing, where the prose parser rightly demands completed wording."""
+    assert _rounds_for(label) == (FundingRound(kind, date(2021, 5, 1)),)
+
+
+@pytest.mark.parametrize("label", ["Planned IPO", "Pre-IPO"])
+def test_a_planned_or_pre_ipo_label_is_not_an_ipo(label):
+    assert all(r.kind != "ipo" for r in _rounds_for(label))
+
+
+def test_a_listed_ipo_round_classifies_as_maturity_without_a_ticker():
+    f = _serving({"data": {"fundingRounds": [
+        {"type": "Series B", "date": "2019-03-01"}, {"type": "IPO", "date": "2021-05-01"},
+    ]}}).company_facts("x.com")
+    assert classify_stage(f, [], date(2026, 10, 1), StageConfig()).stage is Stage.MATURITY

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import re
 from datetime import date
 from typing import Protocol
 
 import httpx
 
 from outreach.contacts.hunter import hunter_get
-from outreach.core.stage import parse_band, parse_round
+from outreach.core.stage import _IPO_PLANNED, parse_band, parse_round
 from outreach.types import CompanyFacts, FundingRound
 
 # Re-exported so callers that already hold a facts provider import band parsing
@@ -18,6 +19,12 @@ __all__ = ["CompanyFactsProvider", "FakeFactsProvider", "HunterFactsProvider", "
 # each is read from the first key that yields a usable value.
 _KIND_KEYS = ("type", "round", "series", "name")
 _DATE_KEYS = ("date", "announcedOn", "announced_on", "announced_at")
+
+# Structured exit labels ("IPO", "post_ipo_equity", "M&A", "Acquisition").
+_LABEL_SEPARATORS = re.compile(r"[_\-]+")
+_LABEL_IPO = re.compile(r"\bIPO\b|\binitial public offering\b", re.I)
+_LABEL_PRE_IPO = re.compile(r"\bpre\s+IPO\b", re.I)
+_LABEL_ACQUIRED = re.compile(r"\bacquired\b|\bacquisitions?\b|\bM&A\b|\bmergers?\b", re.I)
 
 
 class CompanyFactsProvider(Protocol):
@@ -56,6 +63,23 @@ def _first_date(item: dict) -> date | None:
     return None
 
 
+def _structured_exit_kind(label: str) -> str | None:
+    """"ipo" or "acquired" for a round label naming an exit, else None.
+
+    A structured label is a category, not prose. `parse_round` guards LLM
+    quotes, where a bare "IPO" is usually a plan, so it demands completed
+    wording; here "IPO" or "Post-IPO Equity" means the listing happened.
+    Only "planned"/"pre-IPO" style labels are still read as not public.
+    """
+    normalized = _LABEL_SEPARATORS.sub(" ", label)
+    if _LABEL_IPO.search(normalized) and not (_IPO_PLANNED.search(normalized)
+                                              or _LABEL_PRE_IPO.search(normalized)):
+        return "ipo"
+    if _LABEL_ACQUIRED.search(normalized):
+        return "acquired"
+    return None
+
+
 def _funding_round(item: object) -> FundingRound | None:
     if not isinstance(item, dict):
         return None
@@ -63,6 +87,9 @@ def _funding_round(item: object) -> FundingRound | None:
     if text is None:
         return None
     announced = _first_date(item)
+    kind = _structured_exit_kind(text)
+    if kind is not None:
+        return FundingRound(kind, announced)
     # `parse_round` reads prose, where a bare "seed" is too ambiguous to count.
     # Here the value is a structured round label ("Seed"), so retry it in
     # round context before giving up.
