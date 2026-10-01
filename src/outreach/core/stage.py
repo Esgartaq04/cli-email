@@ -17,9 +17,23 @@ from outreach.types import (
     CompanyFacts,
     EvidenceItem,
     FundingRound,
+    SourceClass,
     Stage,
     StageResult,
 )
+
+# Surfaces that describe a company's CURRENT state rather than a dated
+# archive: a careers page, an about page, a live job posting. The pipeline
+# dates them with the day it fetched them, which is honest for "we are hiring
+# for X" but says nothing about when a round they mention closed or an office
+# they list opened. So for stage purposes a signal from one of these is
+# undated: its round has no announcement date, and it is never a *recent*
+# expansion move.
+FETCH_DATED_CLASSES = frozenset({
+    SourceClass.CAREERS_PAGE,
+    SourceClass.JOB_POSTING,
+    SourceClass.ABOUT,
+})
 
 # --- funding-round parsing -------------------------------------------------
 
@@ -32,8 +46,21 @@ _SEED = re.compile(
     re.I,
 )
 _SERIES = re.compile(r"\bseries\s+([a-z])\b", re.I)
+# Only a completed listing makes a company public. A bare "IPO" is mostly
+# private-company news -- "preparing for an IPO", a "pre-IPO round" -- so the
+# word counts only in past-tense or completed context.
+_OFFERING = r"(?:IPO|initial\s+public\s+offering)"
 _IPO = re.compile(
-    r"\bIPO\b|initial public offering|went public|began trading on (?:the )?(?:NYSE|NASDAQ)",
+    r"\bwent\s+public\b"
+    rf"|\b(?:completed|closed|priced)\s+(?:its|our|the|an?)\s+(?:\S+\s+)?{_OFFERING}\b"
+    rf"|\b(?:since|after|following)\s+(?:its|our|the)\s+{_OFFERING}\b"
+    r"|\bIPO'?d\b"
+    r"|\bbegan\s+trading\s+on\b"
+    r"|\blisted\s+on\s+(?:the\s+)?(?:NYSE|NASDAQ)\b",
+    re.I,
+)
+_IPO_PLANNED = re.compile(
+    rf"\b(?:planned|upcoming|preparing\s+for|ahead\s+of)\s+(?:(?:a|an|its|our|the)\s+)?{_OFFERING}",
     re.I,
 )
 # Requires "by": "we acquired Tinyco" is an acquirer, not an acquired company.
@@ -73,7 +100,7 @@ def parse_round(text: str, announced: date | None = None) -> FundingRound | None
     "Series A in 2021, then a Series B this year" is series_b: the company has
     reached the highest round mentioned.
     """
-    if _IPO.search(text):
+    if _IPO.search(text) and not _IPO_PLANNED.search(text):
         return FundingRound("ipo", announced)
     if _ACQUIRED.search(text):
         return FundingRound("acquired", announced)
@@ -146,10 +173,14 @@ def stage_sort_key(stage: Stage, headcount: int | None) -> tuple[int, bool, int]
 
 
 def _latest_round(rounds: Sequence[FundingRound]) -> FundingRound | None:
-    # Dated rounds rank after undated ones; ties fall to the more advanced kind.
+    # An IPO or acquisition ends the private funding story, so it is the
+    # latest round whatever the dates say: an undated "went public" beside a
+    # dated Series B is a public company, not a growth-stage one. Otherwise
+    # dated rounds rank after undated ones; ties fall to the more advanced kind.
     return max(
         rounds,
-        key=lambda r: (r.announced is not None, r.announced or date.min, _kind_rank(r.kind)),
+        key=lambda r: (r.kind in _TERMINAL_KINDS, r.announced is not None,
+                       r.announced or date.min, _kind_rank(r.kind)),
         default=None,
     )
 
@@ -178,6 +209,15 @@ def _stage_from_round(kind: str) -> Stage | None:
     return None
 
 
+def _signal_date(signal: EvidenceItem) -> date | None:
+    """When the event a signal reports happened, as far as we know.
+
+    A fetch-dated surface's date is when we looked, not when anything
+    happened, so it counts as no date at all (see FETCH_DATED_CLASSES).
+    """
+    return None if signal.source_class in FETCH_DATED_CLASSES else signal.published_at
+
+
 def classify_stage(
     facts: CompanyFacts | None,
     signals: Sequence[EvidenceItem],
@@ -195,7 +235,7 @@ def classify_stage(
             r
             for s in signals
             if s.theme == "funding-round"
-            for r in [parse_round(s.quote, s.published_at)]
+            for r in [parse_round(s.quote, _signal_date(s))]
             if r is not None
         ]
     latest = _latest_round(rounds)
@@ -214,7 +254,7 @@ def classify_stage(
     founded = facts.founded_year if facts else None
 
     stage = Stage.UNKNOWN
-    if latest is not None and latest.kind in _TERMINAL_KINDS:
+    if any(r.kind in _TERMINAL_KINDS for r in rounds):
         stage = Stage.MATURITY
     elif (
         founded is not None
@@ -250,8 +290,8 @@ def classify_stage(
                 s
                 for s in signals
                 if s.theme in EXPANSION_SIGNALS
-                and s.published_at is not None
-                and (today - s.published_at).days <= config.signal_recency_days
+                and _signal_date(s) is not None
+                and (today - _signal_date(s)).days <= config.signal_recency_days
             ),
             None,
         )

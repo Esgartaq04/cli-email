@@ -115,3 +115,25 @@ def test_fake_returns_the_given_facts_unknown_domains_none_and_records_calls():
     with pytest.raises(RuntimeError):
         fake.company_facts("bad.com")
     assert fake.calls == ["acme.com", "other.com", "bad.com"]
+
+
+@pytest.mark.parametrize("data", [
+    {"type": "public"}, {"type": "Public"}, {"ticker": "ACME"},
+    {"type": "private", "ticker": "ACME"},
+])
+def test_a_public_company_carries_an_ipo_round(data):
+    """Hunter says it is listed: that is an IPO even with no round history,
+    so the classifier puts it in maturity instead of sorting it as a target."""
+    f = _serving({"data": {**data, "fundingRounds": [{"type": "Series B", "date": "2016-01-01"}]}}
+                 ).company_facts("x.com")
+    assert FundingRound("ipo", None) in f.funding_rounds
+    assert FundingRound("series_b", date(2016, 1, 1)) in f.funding_rounds
+
+
+@pytest.mark.parametrize("data", [
+    {}, {"type": "private"}, {"type": "education"}, {"ticker": ""}, {"ticker": None},
+    {"ticker": 5}, {"type": None},
+])
+def test_a_private_or_unlisted_company_carries_no_ipo_round(data):
+    f = _serving({"data": data}).company_facts("x.com")
+    assert all(r.kind != "ipo" for r in f.funding_rounds)

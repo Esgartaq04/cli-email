@@ -6,6 +6,7 @@ import pytest
 
 from outreach.config import StageConfig
 from outreach.core.stage import (
+    FETCH_DATED_CLASSES,
     classify_stage,
     exceeds_cap,
     parse_band,
@@ -24,8 +25,8 @@ def facts(headcount=None, rounds=(), founded=None):
     return CompanyFacts(headcount, None, founded, tuple(rounds), (), "hunter")
 
 
-def sig(theme, quote, when=T):
-    return EvidenceItem(1, 1, 1, "c", quote, SourceClass.PRESS, "x.example", when, theme)
+def sig(theme, quote, when=T, cls=SourceClass.PRESS):
+    return EvidenceItem(1, 1, 1, "c", quote, cls, "x.example", when, theme)
 
 
 @pytest.mark.parametrize("f,signals,expected", [
@@ -42,6 +43,26 @@ def sig(theme, quote, when=T):
     (facts(headcount=200), [sig("new-office", "We just opened our London office.")], Stage.EXPANSION),
     (facts(headcount=200), [sig("new-office", "Opened London.", date(2024, 1, 1))], Stage.GROWTH),  # stale signal
     (None, [sig("headcount-statement", "We're a team of 150 people.")], Stage.GROWTH),
+    # A current-state page is dated with the day we fetched it, which says
+    # nothing about when a round it mentions closed: the press post's dated
+    # Series C stays the latest round.
+    (None, [sig("funding-round", "We raised our seed round in a garage.", T, SourceClass.ABOUT),
+            sig("funding-round", "Acme announces a $60M Series C.", date(2025, 5, 1))],
+     Stage.EXPANSION),
+    # ...and an about page naming an office is not a recent expansion move.
+    (facts(headcount=200), [sig("new-office", "Offices in London and NYC.", T, SourceClass.ABOUT)],
+     Stage.GROWTH),
+    (facts(headcount=200), [sig("new-market", "We're hiring for our new Berlin team.", T,
+                                SourceClass.CAREERS_PAGE)], Stage.GROWTH),
+    (facts(headcount=200), [sig("new-office", "Join our new Paris office.", T,
+                                SourceClass.JOB_POSTING)], Stage.GROWTH),
+    # A public company is mature whatever round is dated latest.
+    (facts(rounds=[FundingRound("ipo", None), FundingRound("series_b", date(2025, 1, 1))]),
+     [], Stage.MATURITY),
+    (facts(rounds=[FundingRound("series_b", date(2025, 1, 1))]),
+     [sig("funding-round", "Acme went public on the NYSE.", None)], Stage.GROWTH),  # facts win
+    (None, [sig("funding-round", "Acme went public in 2021.", None),
+            sig("funding-round", "Acme raised a Series B.", date(2025, 1, 1))], Stage.MATURITY),
 ])
 def test_classify_stage_truth_table(f, signals, expected):
     assert classify_stage(f, signals, T, C).stage is expected
@@ -103,6 +124,34 @@ def test_maturity_by_age_needs_founded_year_and_dated_round():
                           [], T, C).stage is Stage.GROWTH
 
 
+def test_a_fetch_dated_round_is_undated_in_the_reasons():
+    r = classify_stage(None, [sig("funding-round", "We raised our seed round.", T,
+                                  SourceClass.CAREERS_PAGE)], T, C)
+    assert r.stage is Stage.SEED_STARTUP
+    assert r.reasons == ("Seed",)
+
+
+def test_a_dated_archive_signal_still_dates_its_round_and_promotes():
+    r = classify_stage(None, [sig("funding-round", "We raised a Series A.", date(2026, 3, 1))],
+                       T, C)
+    assert r.reasons == ("Series A (2026-03)",)
+    assert classify_stage(facts(headcount=200), [sig("new-office", "Opened London.", T,
+                                                     SourceClass.ENG_BLOG)],
+                          T, C).stage is Stage.EXPANSION
+
+
+def test_an_ipo_names_the_latest_round_even_when_undated():
+    r = classify_stage(facts(rounds=[FundingRound("series_b", date(2025, 1, 1)),
+                                     FundingRound("ipo", None)]), [], T, C)
+    assert r.stage is Stage.MATURITY
+    assert r.reasons == ("IPO",)
+
+
+def test_fetch_dated_classes_are_the_current_state_surfaces():
+    assert FETCH_DATED_CLASSES == {SourceClass.CAREERS_PAGE, SourceClass.ABOUT,
+                                   SourceClass.JOB_POSTING}
+
+
 def test_acquired_is_maturity():
     assert classify_stage(facts(rounds=[FundingRound("acquired", None)]), [], T, C).stage is Stage.MATURITY
 
@@ -133,6 +182,16 @@ def test_bare_seed_without_round_context_does_not_count():
     ("began trading on the NASDAQ", "ipo"), ("Acme went public", "ipo"),
     ("a pre-seed round, then a seed round", "seed"),
     ("a series of announcements", None),
+    # Only a completed IPO counts; a planned one is a private company's news.
+    ("Acme completed its IPO in 2021", "ipo"), ("we completed our IPO", "ipo"),
+    ("listed on the NYSE since 2019", "ipo"), ("Acme IPO'd last spring", "ipo"),
+    ("since our IPO we have doubled", "ipo"),
+    ("closed its $400M initial public offering", "ipo"),
+    ("Acme is preparing for an IPO", None), ("ahead of its IPO next year", None),
+    ("the planned IPO was postponed", None), ("our upcoming IPO", None),
+    ("we raised a $90M pre-IPO Series E", "series_e"),
+    ("Series D funding, ahead of an IPO", "series_d"),
+    ("an initial public offering is on the roadmap", None),
 ])
 def test_parse_round(text, kind):
     got = parse_round(text)

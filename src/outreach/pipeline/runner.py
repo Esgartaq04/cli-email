@@ -10,7 +10,8 @@ from outreach.core.clustering import cluster_by_theme
 from outreach.core.dedupe import canonical_domain
 from outreach.core.gate import GateVerdict, evaluate
 from outreach.core.ranking import rank_contacts
-from outreach.core.stage import classify_stage, exceeds_cap, stage_sort_key
+from outreach.core.stage import (FETCH_DATED_CLASSES, classify_stage, exceeds_cap,
+                                 stage_sort_key)
 from outreach.core.themes import BUILDING_THEMES, SIGNAL_THEMES
 from outreach.core.workmode import posting_matches
 from outreach.extraction.changelog import split_changelog
@@ -41,12 +42,9 @@ STAGES = ("discover", "enrich", "evidence", "contacts", "synthesize")
 # last push. Where none can be read, `published_at` stays None and the gate
 # treats the evidence as not fresh. That fails toward the no-findings
 # branch, which is the safe direction: we would rather stay silent about a
-# company than claim stale work is current.
-CURRENT_STATE_CLASSES = frozenset({
-    SourceClass.CAREERS_PAGE,
-    SourceClass.JOB_POSTING,
-    SourceClass.ABOUT,
-})
+# company than claim stale work is current. The stage classifier reads the
+# same set the other way round: a fetch date is no date for a funding round.
+CURRENT_STATE_CLASSES = FETCH_DATED_CLASSES
 
 # Evidence the stage classifier reads. "new-market" is also a building theme:
 # entering a market is both something a company is building and a sign that it

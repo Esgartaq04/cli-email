@@ -69,6 +69,13 @@ def _funding_round(item: object) -> FundingRound | None:
     return parse_round(text, announced) or parse_round(f"{text} round", announced)
 
 
+def _is_public(data: dict) -> bool:
+    """Hunter marks a listed company by `type: "public"` or by its ticker."""
+    kind, ticker = data.get("type"), data.get("ticker")
+    return ((isinstance(kind, str) and kind.strip().lower() == "public")
+            or (isinstance(ticker, str) and bool(ticker.strip())))
+
+
 class HunterFactsProvider:
     """Headcount, founding year and funding rounds from Hunter Company Enrichment."""
 
@@ -99,6 +106,11 @@ class HunterFactsProvider:
         rounds = tuple(
             r for r in map(_funding_round, raw_rounds if isinstance(raw_rounds, list) else [])
             if r is not None)
+        if _is_public(data):
+            # A listed company's round history rarely records the listing
+            # itself; without this its last Series B would sort it as a
+            # growth-stage target.
+            rounds += (FundingRound("ipo", None),)
         raw_tags = data.get("tags")
         tags = tuple(t for t in (raw_tags if isinstance(raw_tags, list) else [])
                      if isinstance(t, str))
