@@ -1,7 +1,7 @@
 # Spec B — Startup Discovery from HN "Who is hiring?"
 
 **Date:** 2026-10-01 · **Branch:** `feat/hn-discovery`
-**Status:** Draft, awaiting review
+**Status:** Approved for planning (2026-10-01)
 **Builds on:** `2026-09-30-startup-stage-targeting-design.md` (Spec A), including its **As built** section.
 
 ## Context
