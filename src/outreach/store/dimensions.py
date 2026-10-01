@@ -49,6 +49,13 @@ class CompanyRepo:
         ).fetchone()
         return int(row["id"])
 
+    def find(self, domain: str) -> Company | None:
+        """The stored company for a domain, or None -- never creates one."""
+        row = self.conn.execute(
+            "SELECT id FROM companies WHERE canonical_domain = ?",
+            (canonical_domain(domain),)).fetchone()
+        return self.get(int(row["id"])) if row else None
+
     def get(self, company_id: int) -> Company:
         row = self.conn.execute(
             "SELECT * FROM companies WHERE id = ?", (company_id,)

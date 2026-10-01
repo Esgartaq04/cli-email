@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Sequence
 
 from outreach.contacts.quota import CreditBudget
 from outreach.core.clustering import cluster_by_theme
 from outreach.core.dedupe import canonical_domain
+from outreach.core.hnparse import HN_PUBLISHER, post_text
 from outreach.core.gate import GateVerdict, evaluate
 from outreach.core.ranking import rank_contacts
 from outreach.core.stage import (FETCH_DATED_CLASSES, classify_stage, exceeds_cap,
@@ -20,13 +21,17 @@ from outreach.extraction.htmltext import html_to_text
 from outreach.extraction.pubdate import parse_published_date
 from outreach.net.fetcher import FetchOutcome
 from outreach.pipeline.context import RunContext
+from outreach.pipeline.discovery import (HN_ITEM_URL, HNCandidate, HNSelection,
+                                         candidate_posting, hn_board_source,
+                                         select_hn_candidates)
 from outreach.sources.base import SurfaceTarget
 from outreach.sources.surfaces.blog import find_blog_links
 from outreach.sources.surfaces.github import find_github_org, parse_repos
 from outreach.sources.surfaces.standard import surface_targets
 from outreach.types import (ALL_WORK_MODES, Company, CompanyFacts, EvidenceItem,
-                            FetchAttempt, Finding, PersonRef, PostingRef, SourceClass,
-                            SourceDocument, Stage, WorkMode)
+                            FetchAttempt, Finding, HNPost, HNPostRecord, HNThread,
+                            PersonRef, PostingRef, SourceClass, SourceDocument, Stage,
+                            StageResult, WorkMode)
 
 # The stage names this runner actually checkpoints, in the order it writes
 # them. There is no separate "profile" checkpoint: profiling a company is
@@ -53,8 +58,10 @@ _STAGE_SIGNAL_THEMES = frozenset(SIGNAL_THEMES) | {"new-market"}
 
 # Fetches that reach a host other than the company's own, so answering says
 # nothing about whether a guessed domain is real: a job posting usually lives
-# on the board, and GitHub repos live on api.github.com.
-_OFF_DOMAIN_CLASSES = frozenset({SourceClass.JOB_POSTING, SourceClass.GITHUB})
+# on the board, GitHub repos live on api.github.com, and an HN post lives on
+# news.ycombinator.com.
+_OFF_DOMAIN_CLASSES = frozenset({SourceClass.JOB_POSTING, SourceClass.GITHUB,
+                                 SourceClass.HN_POST})
 
 
 @dataclass
@@ -80,6 +87,18 @@ class RunSummary:
     wall_clock_seconds: float | None = None
     credits_before: int | None = None
     credits_after: int | None = None
+    # HN "Who is hiring?" funnel. Posts dropped before a company existed are
+    # only ever counted here.
+    hn_thread_title: str | None = None
+    hn_posts_read: int = 0
+    hn_role_matched: int = 0
+    hn_parsed: int = 0
+    hn_llm_parsed: int = 0
+    hn_llm_rejected: int = 0
+    hn_filtered: int = 0
+    hn_skipped_recent: int = 0
+    hn_skipped_cap: int = 0
+    hn_kept: int = 0
 
 
 def run_pipeline(
@@ -119,6 +138,20 @@ def run_pipeline(
     postings = ctx.job_board.search(terms, ctx.config.discovery.region)
     if board_errors is not None:
         summary.errors.extend(f"discover: {e}" for e in board_errors[seen_errors:])
+
+    # HN is additive: whatever goes wrong there, the config tokens' companies
+    # are still researched. Discovery re-runs on a resume, like the board
+    # search above, so the per-company HN map is simply rebuilt.
+    hn_by_domain: dict[str, HNCandidate] = {}
+    hn_skipped: list[tuple[str, HNCandidate]] = []
+    hn_title = ""
+    if ctx.hn is not None and ctx.config.hn.enabled:
+        try:
+            postings, hn_by_domain, hn_skipped, hn_title = _discover_hn(
+                ctx, run_id, terms, work_modes, postings, summary)
+        except Exception as exc:
+            summary.errors.append(f"hn: {exc}")
+
     company_ids: list[int] = []
     postings_by_company: dict[int, list[PostingRef]] = {}
     for domain, group in _group_by_domain(postings, summary).items():
@@ -143,6 +176,7 @@ def run_pipeline(
         company_ids.append(company_id)
         postings_by_company[company_id] = matching
     summary.companies = len(company_ids)
+    hn_by_company = _record_hn(ctx, run_id, hn_by_domain, hn_skipped, hn_title, summary)
 
     # One balance check, one budget, shared by every paid call in the run.
     # Enrichment spends first: a company's size decides whether it is worth
@@ -201,7 +235,8 @@ def run_pipeline(
             ctx.fetch_attempts.clear_for_company(
                 run_id, company_id, keep=frozenset({SourceClass.HOMEPAGE}))
             result = _profile_and_extract(ctx, run_id, company_id, summary,
-                                          postings_by_company.get(company_id, ()))
+                                          postings_by_company.get(company_id, ()),
+                                          hn_by_company.get(company_id))
             joined = "; ".join(result.errors)
             summary.errors.extend(f"evidence {company_id}: {e}" for e in result.errors)
             if result.completed or not result.errors:
@@ -367,6 +402,128 @@ def run_pipeline(
     return summary
 
 
+def _discover_hn(ctx: RunContext, run_id: int, terms: Sequence[str],
+                 work_modes: frozenset[WorkMode], postings: list[PostingRef],
+                 summary: RunSummary
+                 ) -> tuple[list[PostingRef], dict[str, HNCandidate],
+                            list[tuple[str, HNCandidate]], str]:
+    """Merge the latest HN thread's companies into this run's postings.
+
+    Returns the merged postings, the HN candidate for every researched HN
+    domain (kept, or already known from config tokens), the skipped ones with
+    their status, and the thread title.
+    """
+    restored = _restored_hn_selection(ctx, run_id, summary)
+    if restored is not None:
+        selection = restored
+    else:
+        known: set[str] = set()
+        for p in postings:
+            try:
+                known.add(canonical_domain(p.company_domain))
+            except ValueError:
+                continue
+        selection = select_hn_candidates(ctx, run_id, terms, work_modes,
+                                         frozenset(known), summary)
+    if selection.thread is None:
+        return postings, {}, [], ""
+
+    # A board token's domain is a guess ("acmehq" -> acmehq.com); the post
+    # links the company's real site, so its board postings take that instead.
+    with_board = [c for c in selection.kept if c.parsed.ats is not None]
+    by_guess = {canonical_domain(f"{c.parsed.ats[1]}.com"): c for c in with_board}
+    hn_postings: list[PostingRef] = []
+    covered: set[str] = set()
+    if with_board:
+        board = hn_board_source(ctx.fetcher, with_board)
+        found = board.search(terms, ctx.config.discovery.region)
+        summary.errors.extend(f"hn: {e}" for e in board.errors)
+        for p in found:
+            candidate = by_guess.get(canonical_domain(p.company_domain))
+            if candidate is None:
+                continue
+            p = replace(p, company_domain=candidate.parsed.domain,
+                        company_name=candidate.parsed.company)
+            hn_postings.append(p)
+            if posting_matches(p, work_modes):
+                covered.add(candidate.parsed.domain)
+    for candidate in selection.kept:
+        # No board, or a board without this role: the post is the posting.
+        if candidate.parsed.domain not in covered:
+            hn_postings.append(candidate_posting(candidate))
+
+    researched = {c.parsed.domain: c for c in [*selection.kept, *selection.known]}
+    skipped = ([("skipped_recent", c) for c in selection.skipped_recent]
+               + [("skipped_cap", c) for c in selection.skipped_cap])
+    return [*postings, *hn_postings], researched, skipped, selection.thread.title
+
+
+def _restored_hn_selection(ctx: RunContext, run_id: int,
+                           summary: RunSummary) -> HNSelection | None:
+    """This run's earlier HN selection, if it made one, rebuilt from storage.
+
+    A resume must not re-select: the thread grows during the month and the
+    LLM fallback is not deterministic, so a fresh selection could push a
+    company that was already kept -- and already paid for -- out of the cap,
+    and would pay the fallback again. Nothing here calls HN or the LLM.
+    """
+    if ctx.hn_posts is None:
+        return None
+    rows = [(cid, r) for cid, r in ctx.hn_posts.for_run(run_id) if r.parsed is not None]
+    if not rows:
+        return None
+    selection = HNSelection(thread=HNThread(0, rows[0][1].thread_title, ()))
+    for _cid, r in rows:
+        post = HNPost(r.item_id, datetime.combine(r.posted_at, datetime.min.time(), timezone.utc),
+                      r.html)
+        candidate = HNCandidate(post, r.parsed, r.parse_method,
+                                StageResult(Stage.UNKNOWN, ()), None)
+        {"kept": selection.kept, "skipped_cap": selection.skipped_cap,
+         "skipped_recent": selection.skipped_recent}[r.status].append(candidate)
+    summary.hn_thread_title = selection.thread.title
+    summary.hn_kept = len(selection.kept)
+    summary.hn_skipped_cap = len(selection.skipped_cap)
+    summary.hn_skipped_recent = len(selection.skipped_recent)
+    return selection
+
+
+def _record_hn(ctx: RunContext, run_id: int, researched: dict[str, HNCandidate],
+               skipped: Sequence[tuple[str, HNCandidate]], title: str,
+               summary: RunSummary) -> dict[int, HNCandidate]:
+    """Record every HN company this run touched; return the researched ones by id.
+
+    Skipped companies are written down -- the report lists who was left out
+    and why -- but get no further stage and cost nothing.
+    """
+    by_company: dict[int, HNCandidate] = {}
+    if ctx.hn_posts is None:
+        return by_company
+
+    def record(cid: int, c: HNCandidate, status: str) -> None:
+        ctx.hn_posts.insert(run_id, cid, HNPostRecord(
+            c.post.item_id, title, c.post.posted_at.date(), c.method, status,
+            c.parsed, c.post.html))
+
+    for domain, candidate in researched.items():
+        try:
+            company = ctx.companies.find(domain)
+            if company is None:
+                continue  # never reached the company table at discover
+            record(company.id, candidate, "kept")
+            by_company[company.id] = candidate
+        except Exception as exc:
+            summary.errors.append(f"hn {domain}: {exc}")
+    for status, candidate in skipped:
+        try:
+            cid = ctx.companies.upsert(candidate.parsed.domain, candidate.parsed.company,
+                                       None, None)
+            ctx.runs.set_stage(run_id, cid, "discover", status)
+            record(cid, candidate, status)
+        except Exception as exc:
+            summary.errors.append(f"hn {candidate.parsed.domain}: {exc}")
+    return by_company
+
+
 def _group_by_domain(
     postings: Sequence[PostingRef], summary: RunSummary
 ) -> dict[str, list[PostingRef]]:
@@ -515,7 +672,8 @@ class _SurfaceSweep:
 
 def _profile_and_extract(ctx: RunContext, run_id: int, company_id: int,
                          summary: RunSummary,
-                         postings: Sequence[PostingRef] = ()) -> _SurfaceSweep:
+                         postings: Sequence[PostingRef] = (),
+                         hn: HNCandidate | None = None) -> _SurfaceSweep:
     company = ctx.companies.get(company_id)
     completed = 0
     errors: list[str] = []
@@ -532,6 +690,14 @@ def _profile_and_extract(ctx: RunContext, run_id: int, company_id: int,
             errors.append(f"{target.source_class.value}: {exc}")
             continue
         completed += 1
+
+    if hn is not None:
+        try:
+            _ingest_hn_post(ctx, run_id, company_id, hn, summary)
+        except Exception as exc:
+            # The post is extra evidence, like a posting: losing it must not
+            # count against the surfaces already read.
+            errors.append(f"hn_post: {exc}")
 
     try:
         _sweep_postings(ctx, run_id, company_id, company.canonical_domain,
@@ -657,6 +823,16 @@ def _ingest_text(ctx: RunContext, run_id: int, company_id: int, domain: str,
     summary.quotes_rejected += result.rejected
 
 
+def _ingest_hn_post(ctx: RunContext, run_id: int, company_id: int,
+                    candidate: HNCandidate, summary: RunSummary) -> None:
+    """The company's own HN post, as first-party evidence dated by the post."""
+    url = HN_ITEM_URL.format(candidate.post.item_id)
+    _ingest_text(ctx, run_id, company_id, HN_PUBLISHER, SourceClass.HN_POST, url, 200,
+                 post_text(candidate.post.html), candidate.post.posted_at.date(), summary)
+    ctx.fetch_attempts.insert(run_id, FetchAttempt(
+        company_id, SourceClass.HN_POST, url, "ok", 200, 1))
+
+
 def _sweep_changelog(ctx: RunContext, run_id: int, company_id: int, domain: str,
                      page: FetchOutcome, summary: RunSummary) -> None:
     """Read each dated release as its own document, newest first.
@@ -763,6 +939,8 @@ def _sweep_postings(ctx: RunContext, run_id: int, company_id: int, domain: str,
             break
         if posting.url in seen:
             continue
+        if posting.url.startswith("https://news.ycombinator.com/"):
+            continue  # the HN post itself, already read as an hn_post document
         seen.add(posting.url)
         outcome = ctx.fetcher.get(posting.url)
         if outcome.outcome != "ok" or not outcome.body:

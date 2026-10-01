@@ -2,7 +2,7 @@
 min_independent_sources = 1
 require_first_party = true
 recency_days = 180
-first_party_classes = ["job_posting", "careers_page", "eng_blog", "changelog", "github", "status_page", "press", "about"]
+first_party_classes = ["job_posting", "careers_page", "eng_blog", "changelog", "github", "status_page", "press", "about", "hn_post"]
 
 [ranking]
 max_contacts_per_company = 3
@@ -31,6 +31,12 @@ max_job_postings = 2    # matching job postings read per company
 # finder_cost = 1
 # linkedin_lookup = true
 # facts_ttl_days = 90
+
+# [hn]                            # discovery from HN's "Who is hiring?" thread
+# enabled = true
+# max_new_companies = 15          # HN companies researched per run, best stage hints first
+# llm_fallback_max = 20           # LLM parses per run for posts the rules can't parse
+# recheck_days = 30               # skip HN companies researched this recently
 
 [paths]
 db = "data/pipeline.db"

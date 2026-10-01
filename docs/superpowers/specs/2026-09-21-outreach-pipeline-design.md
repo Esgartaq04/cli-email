@@ -1,7 +1,7 @@
 # Outreach Research Pipeline — V1 Design
 
 **Date:** 2026-09-21
-**Status:** Approved for planning
+**Status:** Implemented (V1). The targeting, evidence themes, gate thresholds, contacts flow and report layout were superseded by `2026-09-30-startup-stage-targeting-design.md` (merged in PR #2); read that spec for current behaviour.
 **Author:** Esteven (with Claude)
 
 ---

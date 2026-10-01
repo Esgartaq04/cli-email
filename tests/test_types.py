@@ -40,3 +40,8 @@ def test_posting_ref_defaults_to_unknown_mode_and_type():
 def test_company_positional_construction_still_works():
     c = Company(1, "co.example", "Co", None, None)
     assert c.funding_rounds == () and c.github_org is None
+
+
+def test_hn_post_source_class_value():
+    from outreach.types import SourceClass
+    assert SourceClass("hn_post") is SourceClass.HN_POST

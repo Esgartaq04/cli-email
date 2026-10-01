@@ -51,7 +51,7 @@ def test_migration_upgrades_a_v1_database_and_keeps_contacted_history(tmp_path):
     conn.commit()
     conn.close()
     new = connect(tmp_path / "old.db")
-    assert new.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert new.execute("PRAGMA user_version").fetchone()[0] == 3
     assert ContactRepo(new).for_company(1)[0].contacted_at is not None
     # The pre-existing company reads back with the new fields empty, and the
     # pre-existing run is tagged as a v1 run.
@@ -63,7 +63,7 @@ def test_migration_upgrades_a_v1_database_and_keeps_contacted_history(tmp_path):
 def test_connect_is_idempotent_across_versions(tmp_path):
     connect(tmp_path / "t.db").close()
     conn = connect(tmp_path / "t.db")
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
 
 
 def test_migrate_applies_nothing_once_current(tmp_path, monkeypatch):
@@ -88,4 +88,19 @@ def test_failed_migration_rolls_back_columns_and_version(tmp_path, monkeypatch):
     # ...and the real migration still applies cleanly afterwards.
     monkeypatch.undo()
     migrate(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+def test_migration_to_v3_from_v2_keeps_contact_history(tmp_path):
+    conn = _v1_database(tmp_path / "v2.db")
+    conn.executescript(migrations.MIGRATIONS[0])  # exactly what a v2 install has
+    conn.execute("INSERT INTO companies (canonical_domain, name) VALUES ('a.example','A')")
+    conn.execute("INSERT INTO contacts (company_id, full_name, title, email_status, contacted_at) "
+                 "VALUES (1,'Ann','CTO','verified','2026-09-01T00:00:00')")
+    conn.commit()
+    conn.close()
+    new = connect(tmp_path / "v2.db")
+    assert new.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert ContactRepo(new).for_company(1)[0].contacted_at is not None
+    tables = {r[0] for r in new.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "run_hn_posts" in tables

@@ -27,7 +27,11 @@ The first rule that matches wins; funding beats headcount.
 | unknown | Nothing found to classify it by |
 
 Headcount, funding rounds and founding year come from Hunter's Company
-Enrichment; quotes found in press and about pages fill the gaps.
+Enrichment; quotes found in press and about pages fill the gaps. Quotes from
+pages that describe the company *today* (careers, about, job postings) can't
+date a funding round or count as a recent expansion signal, since their only
+date is the day they were fetched. Any IPO or acquisition among the known
+rounds makes a company mature, whatever came after it.
 
 ## Install
 
@@ -56,10 +60,12 @@ OUTREACH_CONTACT_EMAIL=you@example.com
 ```
 
 - `ANTHROPIC_API_KEY` — used by `AnthropicLLM` (`src/outreach/llm/anthropic_client.py`)
-  to expand role titles, extract claims from fetched pages, and write the
-  one-paragraph summary. It has exactly those three jobs; the pass/fail
-  decision about whether evidence is good enough is deterministic code, not a
-  model call.
+  to expand role titles, extract claims from fetched pages, write the
+  one-paragraph summary, and read HN posts the deterministic parser can't. It
+  has exactly those four jobs. The pass/fail decision about evidence, the
+  startup stage and the size cap are deterministic code, never a model call;
+  and every field the model reads out of an HN post must appear in the post
+  itself, or the post is dropped.
 - `HUNTER_API_KEY` — used by `HunterProvider` (`src/outreach/contacts/hunter.py`)
   to find people at a company's domain and verify their email addresses, and
   by `HunterFactsProvider` (`src/outreach/contacts/facts.py`) for company facts
@@ -90,7 +96,7 @@ require_first_party = true        # at least one source must be first-party
 recency_days = 180                # evidence older than this is not "current"
 first_party_classes = [           # which source classes count as first-party
   "job_posting", "careers_page", "eng_blog", "changelog", "github", "status_page",
-  "press", "about"
+  "press", "about", "hn_post"
 ]
 # max_findings_per_company = 3    # findings kept per company
 
@@ -124,6 +130,12 @@ max_job_postings = 2              # matching job postings read per company
 # linkedin_lookup = true          # set false to skip LinkedIn lookups entirely
 # facts_ttl_days = 90             # reuse a company's cached facts for this long
 
+# [hn]                            # discovery from HN's "Who is hiring?" thread
+# enabled = true
+# max_new_companies = 15          # HN companies researched per run, best stage hints first
+# llm_fallback_max = 20           # LLM parses per run for posts the rules can't parse
+# recheck_days = 30               # skip HN companies researched this recently
+
 [paths]
 db = "data/pipeline.db"           # SQLite database (created on first run)
 cache = "data/cache"              # content-addressed cache of fetched pages
@@ -134,7 +146,34 @@ The three token lists are the company slugs in public job-board URLs:
 `https://boards.greenhouse.io/<token>`, `https://jobs.ashbyhq.com/<token>` and
 `https://jobs.lever.co/<token>`. Add the companies you want discovery to
 search. A board with no tokens is simply not searched; if all three lists are
-empty the CLI warns that the run will discover zero companies.
+empty and HN discovery is off, the CLI warns that the run will discover zero
+companies.
+
+## Discovery from Hacker News
+
+Every run also reads the latest monthly "Ask HN: Who is hiring?" thread (free,
+through the HN Algolia API) and adds companies from it, on top of your tokens:
+
+1. Only posts that mention the role (any of the expanded role titles) go on.
+2. Each post is parsed by rules: the `Company | Role | Location | REMOTE |
+   Full-time` first line, the company's own website from the post's links,
+   and a Greenhouse, Ashby or Lever board if one is linked. Posts the rules
+   can't read go to the LLM, at most `llm_fallback_max` per run, and its answer
+   is kept only if every field appears in the post.
+3. The same US-region and `--work-mode` filters apply.
+4. Before any credit is spent, companies are ranked by what their post gives
+   away for free ("Series B", "team of 80": growth and expansion first),
+   companies researched in the last `recheck_days` days are skipped, and only
+   the top `max_new_companies` are kept. The rest appear in the report's
+   Excluded list.
+5. A kept company with a board is searched through that board, using the
+   post's real website rather than a domain guessed from the board token; one
+   without a board (or whose board lacks the role) uses the post itself as its
+   posting. Either way the post is read as first-party evidence (`hn_post`),
+   dated by when it was posted.
+
+If HN can't be reached the run carries on with your tokens. `--no-hn` skips
+it for one run; `[hn] enabled = false` turns it off.
 
 ## Commands
 
@@ -164,9 +203,15 @@ Options:
   LinkedIn-lookup credits (60 total); 80 remain.` Companies are counted after
   the `--work-mode` filter. The LinkedIn figure is companies x
   `max_contacts_per_company` x `finder_cost`, or 0 with
-  `linkedin_lookup = false`. These are upper bounds. Nothing is spent and no
-  report is written. If the balance can't be fetched the estimate is still
+  `linkedin_lookup = false`. These are upper bounds. No Hunter credits are
+  spent and no report is written; the only paid call is one Anthropic request
+  that expands the role title into search terms. If the balance can't be fetched the estimate is still
   printed, marked as unchecked, with a non-zero exit status.
+- `--no-hn` — skip discovery from HN's "Who is hiring?" thread for this run.
+  In a `--dry-run`, HN is read and parsed for free (never the LLM fallback),
+  and an extra `HN: ...` line shows how many posts were read, matched the role,
+  parsed, would need the LLM fallback, and survive the cap; the credit
+  estimate includes those companies.
 - `--resume RUN_ID` — resume a previously interrupted run by its id instead
   of starting a new one. Work already checkpointed for a stage is not
   repeated.
@@ -179,7 +224,10 @@ outreach report 3
 
 Re-renders a completed run's HTML report from what is already stored in the
 database, without touching any adapter or spending any credits. Useful after
-changing report formatting, or to regenerate a report you deleted.
+changing report formatting, or to regenerate a report you deleted. Runs made
+before the stage-targeting change (schema v1) can't be re-rendered in the new
+layout; the command says so and exits non-zero — their original HTML files in
+`reports/` are the record.
 
 ## Credit costs and limits
 
@@ -196,6 +244,10 @@ changing report formatting, or to regenerate a report you deleted.
 - A failed LinkedIn lookup is re-attempted, and re-charged, on later runs.
 - GitHub's unauthenticated API allows 60 requests per hour, so on a large run
   the repository evidence thins out once that is used up.
+- HN discovery adds up to `max_new_companies` (15) companies per run, each
+  costing the same Hunter credits as a token company; lower it if your balance
+  is small. It never spends credits on companies skipped by the cap or the
+  recheck window.
 
 ## Reading the report
 
@@ -207,4 +259,22 @@ size cap, or no posting in the requested work mode), then run diagnostics.
 Every quote links back to the source page it was extracted from. A contact's
 email address is shown only when Hunter's verifier confirmed it as
 deliverable — an unverified or not-found address is never printed as though it
-were a working one — and a LinkedIn link appears only when a lookup found one.
+were a working one. A **LinkedIn** link appears only when a profile was found;
+otherwise the contact gets a clearly labelled **Search LinkedIn** link (a
+people search for the name and company), which is never stored or presented as
+a found profile.
+
+Under each company, **Hooks for a build** lists the public GitHub repositories
+this run saw recently pushed and the company's developer docs (the first of
+`/docs`, `/developers`, `/api` that answered) — raw material if you'd rather build
+something for a company than write to it.
+
+## Tests
+
+```bash
+.venv/Scripts/python -m pytest -q    # Windows; .venv/bin/python on macOS/Linux
+```
+
+Every test runs against fakes and recorded fixtures; none touches a live API or
+your `.env`. The CLI tests patch out `.env` loading and run in a scratch
+directory, so they never see your real keys, config or database.

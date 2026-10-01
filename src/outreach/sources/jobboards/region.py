@@ -10,6 +10,14 @@ from typing import Sequence
 # Tel Aviv "IL") and a false accept would defeat V1's US-only scoping.
 _US_MARKERS = (
     "united states", "usa", "u.s.", "remote - us", "remote (us", "us remote",
+    "us-remote", "remote us", "remote, us", "us only", "us-only",
+    # Major US hubs as people write them without a state code ("NYC",
+    # "SF Bay Area") -- common in free-text HN posts. Non-US markers are
+    # still checked first, so "London" can never be read as US.
+    "nyc", "new york", "brooklyn", "manhattan", "san francisco", "sf",
+    "bay area", "silicon valley", "palo alto", "mountain view", "seattle",
+    "boston", "austin", "los angeles", "chicago", "denver", "atlanta", "miami",
+    "washington, dc", "washington dc",
 )
 
 # Recognized non-US markers. Checked before the trailing state-code check
@@ -70,6 +78,9 @@ def _contains_marker(lowered: str, markers: Sequence[str]) -> bool:
     )
 
 
+# Whole location strings that mean the US.
+_US_WHOLE = frozenset({"us", "u.s", "usa", "u.s.a", "united states"})
+
 # Structured country values (Ashby addressCountry, Lever country) that mean the US.
 _US_COUNTRIES = frozenset({"US", "USA", "UNITED STATES", "UNITED STATES OF AMERICA"})
 
@@ -93,6 +104,10 @@ def matches_region(location: str, region: str, country: str | None = None) -> bo
     lowered = location.lower()
     if _contains_marker(lowered, _NON_US_MARKERS):
         return False
+    # "US" on its own is a location; "US" inside a phrase usually is not
+    # ("US hours overlap", "LATAM (US timezones)", "contact us").
+    if lowered.strip(" .()") in _US_WHOLE:
+        return True
     if _contains_marker(lowered, _US_MARKERS):
         return True
     match = _TRAILING_STATE_CODE.search(lowered)
