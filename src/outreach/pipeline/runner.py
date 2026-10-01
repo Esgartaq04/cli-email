@@ -1,42 +1,60 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime
 from typing import Sequence
 
-from outreach.contacts.quota import QuotaPlan, allocate_quota
+from outreach.contacts.quota import CreditBudget
 from outreach.core.clustering import cluster_by_theme
 from outreach.core.dedupe import canonical_domain
 from outreach.core.gate import GateVerdict, evaluate
 from outreach.core.ranking import rank_contacts
+from outreach.core.stage import (FETCH_DATED_CLASSES, classify_stage, exceeds_cap,
+                                 stage_sort_key)
+from outreach.core.themes import BUILDING_THEMES, SIGNAL_THEMES
+from outreach.core.workmode import posting_matches
+from outreach.extraction.changelog import split_changelog
 from outreach.extraction.extract import extract_and_persist
 from outreach.extraction.htmltext import html_to_text
+from outreach.extraction.pubdate import parse_published_date
+from outreach.net.fetcher import FetchOutcome
 from outreach.pipeline.context import RunContext
 from outreach.sources.base import SurfaceTarget
+from outreach.sources.surfaces.blog import find_blog_links
+from outreach.sources.surfaces.github import find_github_org, parse_repos
 from outreach.sources.surfaces.standard import surface_targets
-from outreach.types import (Bottleneck, EvidenceItem, FetchAttempt, PersonRef,
-                            PostingRef, SourceClass, SourceDocument)
+from outreach.types import (ALL_WORK_MODES, Company, CompanyFacts, EvidenceItem,
+                            FetchAttempt, Finding, PersonRef, PostingRef, SourceClass,
+                            SourceDocument, Stage, WorkMode)
 
 # The stage names this runner actually checkpoints, in the order it writes
 # them. There is no separate "profile" checkpoint: profiling a company is
 # the first half of the evidence stage and shares its fate, so a resume that
 # trusted a "profile: ok" row would have nothing to skip.
-STAGES = ("discover", "evidence", "contacts", "synthesize")
+STAGES = ("discover", "enrich", "evidence", "contacts", "synthesize")
 
 # Surfaces that describe a company's CURRENT state rather than a dated
 # archive. For these the fetch date is an honest publication date: a
-# careers page or a status page says what is true today. An eng blog post,
-# a changelog entry, a GitHub event or a news article are dated artifacts,
-# and V1 parses no date out of them — so their `published_at` stays None
-# and the gate treats them as not-fresh. That fails toward the
-# no-bottleneck branch, which is the safe direction: we would rather stay
-# silent about a company than claim stale pain is current.
-CURRENT_STATE_CLASSES = frozenset({
-    SourceClass.CAREERS_PAGE,
-    SourceClass.JOB_POSTING,
-    SourceClass.STATUS_PAGE,
-})
+# careers page or an about page says what is true today. A blog or press
+# post, a changelog entry and a GitHub repo are dated artifacts and carry
+# their own date -- from the post's markup, the entry's heading, the repo's
+# last push. Where none can be read, `published_at` stays None and the gate
+# treats the evidence as not fresh. That fails toward the no-findings
+# branch, which is the safe direction: we would rather stay silent about a
+# company than claim stale work is current. The stage classifier reads the
+# same set the other way round: a fetch date is no date for a funding round.
+CURRENT_STATE_CLASSES = FETCH_DATED_CLASSES
+
+# Evidence the stage classifier reads. "new-market" is also a building theme:
+# entering a market is both something a company is building and a sign that it
+# is scaling, so it can be a finding AND promote a growth company to expansion.
+_STAGE_SIGNAL_THEMES = frozenset(SIGNAL_THEMES) | {"new-market"}
+
+# Fetches that reach a host other than the company's own, so answering says
+# nothing about whether a guessed domain is real: a job posting usually lives
+# on the board, and GitHub repos live on api.github.com.
+_OFF_DOMAIN_CLASSES = frozenset({SourceClass.JOB_POSTING, SourceClass.GITHUB})
 
 
 @dataclass
@@ -46,7 +64,13 @@ class RunSummary:
     sector: str = ""
     companies: int = 0
     evidenced: int = 0
-    no_bottleneck: int = 0
+    no_findings: int = 0
+    excluded_size: int = 0
+    excluded_no_matching_posting: int = 0
+    facts_fetched: int = 0
+    facts_cached: int = 0
+    # Companies per startup stage, keyed by `Stage.value`.
+    stage_counts: dict[str, int] = field(default_factory=dict)
     quotes_accepted: int = 0
     quotes_rejected: int = 0
     skipped_quota: int = 0
@@ -59,9 +83,11 @@ class RunSummary:
 
 
 def run_pipeline(
-    ctx: RunContext, role_title: str, sector: str, resume_run_id: int | None = None
+    ctx: RunContext, role_title: str, sector: str, resume_run_id: int | None = None,
+    work_modes: frozenset[WorkMode] = ALL_WORK_MODES,
 ) -> RunSummary:
-    """Six stages, per-company isolation. One bad domain never costs the others.
+    """Five checkpointed stages, per-company isolation. One bad domain never
+    costs the others.
 
     Every per-company step is wrapped: a failure becomes a `failed` stage
     row and an entry in `summary.errors`, and the loop moves on.
@@ -85,21 +111,82 @@ def run_pipeline(
 
     # --- discover -------------------------------------------------------
     terms = ctx.llm.expand_titles(role_title)
+    # A multi-board source swallows one board's failure so the others'
+    # postings survive, and keeps the error for us to surface. Only this
+    # search's errors are ours: the list accumulates across calls.
+    board_errors = getattr(ctx.job_board, "errors", None)
+    seen_errors = len(board_errors) if board_errors is not None else 0
     postings = ctx.job_board.search(terms, ctx.config.discovery.region)
+    if board_errors is not None:
+        summary.errors.extend(f"discover: {e}" for e in board_errors[seen_errors:])
     company_ids: list[int] = []
+    postings_by_company: dict[int, list[PostingRef]] = {}
     for domain, group in _group_by_domain(postings, summary).items():
+        matching = [p for p in group if posting_matches(p, work_modes)]
         try:
             company_id = ctx.companies.upsert(domain, group[0].company_name, None, None)
+            if not matching:
+                # Recorded, not dropped: the report lists who was left out
+                # and why, so a too-narrow filter is visible rather than
+                # looking like a board that found nothing.
+                ctx.runs.set_stage(run_id, company_id, "discover",
+                                   "excluded_no_matching_posting")
+                summary.excluded_no_matching_posting += 1
+                continue
+            for posting in matching:
+                ctx.postings.insert(run_id, company_id, posting)
+            ctx.runs.set_stage(run_id, company_id, "discover", "ok")
         except Exception as exc:  # one unusable domain is not a dead run
             summary.failures += 1
             summary.errors.append(f"discover {domain}: {exc}")
             continue
-        ctx.runs.set_stage(run_id, company_id, "discover", "ok")
         company_ids.append(company_id)
+        postings_by_company[company_id] = matching
     summary.companies = len(company_ids)
 
-    # --- profile + evidence (per company, isolated) ---------------------
+    # One balance check, one budget, shared by every paid call in the run.
+    # Enrichment spends first: a company's size decides whether it is worth
+    # researching at all, and contacts for a company we then drop would be
+    # credits spent on nobody.
+    credit_error: Exception | None = None
+    try:
+        summary.credits_before = ctx.contact_provider.remaining_credits()
+    except Exception as exc:
+        # Asking the provider how much budget is left is a network call for
+        # a real adapter. Losing it costs us every paid call this run, not
+        # the evidence still to gather.
+        credit_error = exc
+        summary.errors.append(f"credits: {exc}")
+    budget = CreditBudget(summary.credits_before or 0)
+
+    # --- enrich (per company, isolated) ---------------------------------
+    research_ids: list[int] = []
     for company_id in company_ids:
+        status = ctx.runs.stage_status(run_id, company_id, "enrich")
+        if status not in ("ok", "excluded_size"):
+            try:
+                status, error = _enrich(ctx, run_id, company_id, budget, summary)
+                ctx.runs.set_stage(run_id, company_id, "enrich", status, error=error)
+            except Exception as exc:
+                # Enrichment only ever narrows or labels the list; a company
+                # we failed to enrich is still researched, as size unknown.
+                # It is not a `failures` entry: nothing about it was lost.
+                status = "failed"
+                summary.errors.append(f"enrich {company_id}: {exc}")
+                try:
+                    ctx.runs.set_stage(run_id, company_id, "enrich", "failed",
+                                       error=str(exc))
+                except Exception as stage_exc:
+                    summary.errors.append(f"enrich {company_id}: {stage_exc}")
+        if status == "excluded_size":
+            # Known to be over the cap: dropped here, before a single LLM
+            # call is spent researching it.
+            summary.excluded_size += 1
+            continue
+        research_ids.append(company_id)
+
+    # --- profile + evidence (per company, isolated) ---------------------
+    for company_id in research_ids:
         if ctx.runs.stage_status(run_id, company_id, "evidence") == "ok":
             continue
         try:
@@ -107,9 +194,14 @@ def run_pipeline(
             # so drop whatever a previous partial attempt left behind.
             # `evidence_items` has no unique key, so without this a resume
             # doubles the rows and the report cites the same quote twice.
+            # The homepage attempt belongs to the enrich stage, which is not
+            # being re-run, and is what confirms the domain for contacts --
+            # so it is kept.
             ctx.evidence.clear_for_company(run_id, company_id)
-            ctx.fetch_attempts.clear_for_company(run_id, company_id)
-            result = _profile_and_extract(ctx, run_id, company_id, summary)
+            ctx.fetch_attempts.clear_for_company(
+                run_id, company_id, keep=frozenset({SourceClass.HOMEPAGE}))
+            result = _profile_and_extract(ctx, run_id, company_id, summary,
+                                          postings_by_company.get(company_id, ()))
             joined = "; ".join(result.errors)
             summary.errors.extend(f"evidence {company_id}: {e}" for e in result.errors)
             if result.completed or not result.errors:
@@ -131,6 +223,37 @@ def run_pipeline(
             summary.errors.append(f"evidence {company_id}: {exc}")
             ctx.runs.set_stage(run_id, company_id, "evidence", "failed", error=str(exc))
 
+    # --- late size check (per company, isolated) ------------------------
+    # A homepage that bot-blocks us skips enrichment, so the size cap was
+    # never checked -- and the large companies are the ones that block. If
+    # research then reached the domain anyway, it is confirmed for contacts,
+    # so it must clear the same size check before a contact credit is spent.
+    research_ids = _size_check_late_confirmed(ctx, run_id, research_ids, budget, summary)
+
+    # --- classify (per company, isolated; not a checkpoint) -------------
+    # A pure function of the stored facts and evidence, so it is simply
+    # recomputed on every run and resume: skipping it on resume would leave
+    # contacts with no order to spend credits in. A company whose research
+    # failed is still classified -- Hunter's facts alone often place it, and
+    # the report lists every researched company under a stage.
+    contact_priority: dict[int, tuple] = {}
+    for company_id in research_ids:
+        try:
+            company = ctx.companies.get(company_id)
+            signals = [i for i in ctx.evidence.for_company(run_id, company_id)
+                       if i.theme in _STAGE_SIGNAL_THEMES]
+            result = classify_stage(facts_of(company), signals, ctx.today,
+                                    ctx.config.stage)
+            ctx.runs.set_company_stage(run_id, company_id, result)
+        except Exception as exc:
+            # An unclassified company is still researched and still gets
+            # contacts, just behind the ones we know are worth it.
+            summary.errors.append(f"classify {company_id}: {exc}")
+            continue
+        contact_priority[company_id] = stage_sort_key(result.stage, company.headcount)
+        key = result.stage.value
+        summary.stage_counts[key] = summary.stage_counts.get(key, 0) + 1
+
     # --- contacts (quota-aware) -----------------------------------------
     # A Greenhouse board token is a guessed domain label, never a confirmed
     # one (see `sources/jobboards/greenhouse.py`): `acmecorp` is not
@@ -141,13 +264,11 @@ def run_pipeline(
     # them under the target's name with a green "verified" badge. Requiring
     # at least one successful surface fetch before spending an enrichment
     # credit is cheap insurance against emailing the wrong company.
-    still_pending = [c for c in company_ids
+    still_pending = [c for c in research_ids
                      if ctx.runs.stage_status(run_id, c, "contacts") != "ok"]
     pending = []
     for company_id in still_pending:
-        confirmed = any(a.outcome == "ok"
-                        for a in ctx.fetch_attempts.for_company(run_id, company_id))
-        if confirmed:
+        if _domain_confirmed(ctx, run_id, company_id):
             pending.append(company_id)
         else:
             try:
@@ -156,36 +277,58 @@ def run_pipeline(
             except Exception as exc:
                 summary.errors.append(f"contacts {company_id}: {exc}")
             summary.skipped_domain_unconfirmed += 1
-    try:
-        summary.credits_before = ctx.contact_provider.remaining_credits()
-        plan = allocate_quota(pending, summary.credits_before)
-    except Exception as exc:
-        # Asking the provider how much budget is left is a network call for
-        # a real adapter. Losing it costs us the contacts stage, not the
-        # evidence we have already paid to gather.
-        summary.errors.append(f"contacts: {exc}")
-        for company_id in pending:
+    # Credits run out in the order companies are paid for, so the ones this
+    # tool exists for (growth and expansion) go first rather than whichever
+    # the job board happened to list first. The id breaks ties so two runs
+    # over the same companies spend the same way.
+    unclassified = stage_sort_key(Stage.UNKNOWN, None)
+    pending.sort(key=lambda c: (contact_priority.get(c, unclassified), c))
+    # Two passes over the same order. Every company's contact search is paid
+    # for first; LinkedIn lookups only get what is left. A lookup is an extra
+    # on a contact we already have, and buying company A's three of them
+    # must never leave company B with no contacts at all.
+    found: list[tuple[int, list[PersonRef]]] = []
+    for company_id in pending:
+        if credit_error is not None:
+            # We never learned the balance: an outage, not a shortfall.
+            # `skipped_quota` would tell the reader to buy credits they may
+            # already have.
             summary.failures += 1
             try:
                 ctx.runs.set_stage(run_id, company_id, "contacts", "failed",
-                                   error=str(exc))
+                                   error=str(credit_error))
             except Exception as stage_exc:
                 # Already handling one outage; a second fault writing this
                 # company's checkpoint must not stop the rest of the pending
                 # companies from at least being recorded as failed too.
                 summary.errors.append(f"contacts {company_id}: {stage_exc}")
-        plan = QuotaPlan(process=[], skipped=[])
-    for company_id in plan.skipped:
-        ctx.runs.set_stage(run_id, company_id, "contacts", "skipped_quota")
-        summary.skipped_quota += 1
-    for company_id in plan.process:
+            continue
+        if not budget.try_spend(1):
+            # Running out of credits is a normal condition, not an error:
+            # the report says `skipped — quota` rather than going quiet.
+            ctx.runs.set_stage(run_id, company_id, "contacts", "skipped_quota")
+            summary.skipped_quota += 1
+            continue
         try:
-            _resolve_contacts(ctx, company_id, role_title)
+            unlinked = _resolve_contacts(ctx, company_id, role_title)
             ctx.runs.set_stage(run_id, company_id, "contacts", "ok")
         except Exception as exc:
             summary.failures += 1
             summary.errors.append(f"contacts {company_id}: {exc}")
             ctx.runs.set_stage(run_id, company_id, "contacts", "failed", error=str(exc))
+            continue
+        found.append((company_id, unlinked))
+    # Only companies searched in THIS invocation: a resume that skipped a
+    # company's `contacts: ok` step must not buy its lookups a second time.
+    # A crash between the passes loses that run's lookups, which is the
+    # cheap direction -- the next run looks up any profile still missing.
+    for company_id, unlinked in found:
+        try:
+            _link_profiles(ctx, company_id, unlinked, budget, summary)
+        except Exception as exc:
+            # The contacts are stored and the stage is done; a profile link
+            # that failed to save is this company's loss, not the run's.
+            summary.errors.append(f"linkedin {company_id}: {exc}")
 
     try:
         summary.credits_after = ctx.contact_provider.remaining_credits()
@@ -196,11 +339,11 @@ def run_pipeline(
         summary.errors.append(f"contacts credits_after: {exc}")
 
     # --- gate + synthesize ----------------------------------------------
-    for company_id in company_ids:
+    for company_id in research_ids:
         if ctx.runs.stage_status(run_id, company_id, "evidence") != "ok":
             # Research never completed for this company. Recording "no
-            # bottleneck found" would be a verdict about work we did not
-            # do; the failure is already on the record as a stage row.
+            # findings" would be a verdict about work we did not do; the
+            # failure is already on the record as a stage row.
             continue
         if ctx.runs.stage_status(run_id, company_id, "synthesize") == "ok":
             continue
@@ -248,6 +391,121 @@ def _group_by_domain(
     return grouped
 
 
+def _enrich(ctx: RunContext, run_id: int, company_id: int, budget: CreditBudget,
+            summary: RunSummary) -> tuple[str, str | None]:
+    """Confirm the domain, find its GitHub org, and learn the company's size.
+
+    Returns the enrich stage's (status, error). Every outcome but
+    `excluded_size` keeps the company in the run: a size we could not
+    learn is unknown, and unknown never drops a company.
+    """
+    company = ctx.companies.get(company_id)
+    # Only the homepage row is this stage's to re-derive; the evidence
+    # stage's rows for the same company stay (see `clear_for_company`).
+    ctx.fetch_attempts.clear_for_company(
+        run_id, company_id, only=frozenset({SourceClass.HOMEPAGE}))
+    homepage = ctx.fetcher.get(f"https://{company.canonical_domain}/")
+    _record_attempt(ctx, run_id, company_id, SourceClass.HOMEPAGE, homepage, 0)
+
+    status, error = "ok", None
+    if homepage.outcome != "ok":
+        # The same guard as contacts: a guessed domain nobody answers on may
+        # be someone else's, and their Hunter record would be the wrong
+        # company's size -- enough to drop the right company on a stranger's
+        # headcount. Research still runs; it is how the report shows why.
+        status = "skipped_domain_unconfirmed"
+    else:
+        # A homepage that links no org is not proof the org is gone: a
+        # JS-rendered page links nothing at all. Only a found org is written,
+        # so one we learned earlier survives.
+        github_org = find_github_org(homepage.body or "")
+        if github_org:
+            ctx.companies.set_github_org(company_id, github_org)
+        status, error = _company_facts(ctx, company, budget, summary)
+
+    company = ctx.companies.get(company_id)
+    if exceeds_cap(company.headcount, company.headcount_band,
+                   ctx.config.discovery.headcount_max):
+        return "excluded_size", None
+    return status, error
+
+
+def _company_facts(ctx: RunContext, company: Company, budget: CreditBudget,
+                   summary: RunSummary) -> tuple[str, str | None]:
+    """Buy this company's facts unless the stored ones are still fresh."""
+    fetched_at = company.facts_fetched_at
+    if (fetched_at is not None and (ctx.today - fetched_at.date()).days
+            < ctx.config.hunter.facts_ttl_days):
+        summary.facts_cached += 1
+        return "ok", None
+    if not budget.try_spend(ctx.config.hunter.enrichment_cost):
+        return "skipped_quota", None
+    # Stamped with the run's date, not the wall clock, so the TTL check above
+    # agrees with it and a run stays reproducible.
+    stamp = datetime.combine(ctx.today, datetime.min.time())
+    try:
+        facts = ctx.facts_provider.company_facts(company.canonical_domain)
+    except Exception as exc:
+        # Hunter adapters raise errors carrying status and path only, never
+        # the key, so the text is safe to keep on the stage row.
+        summary.errors.append(f"enrich {company.id}: {exc}")
+        return "failed", str(exc)
+    if facts is None:
+        # Hunter was asked and had nothing: remembered, so the next run
+        # inside the TTL does not pay again for the same miss.
+        ctx.companies.mark_facts_checked(company.id, stamp)
+    else:
+        ctx.companies.set_facts(company.id, facts, stamp)
+    summary.facts_fetched += 1
+    return "ok", None
+
+
+def _domain_confirmed(ctx: RunContext, run_id: int, company_id: int) -> bool:
+    """Whether any fetch this run actually reached the company's own domain.
+
+    A job-posting page is usually hosted by the job board, not the company,
+    and GitHub repos are read from api.github.com, so reaching either says
+    nothing about the guessed domain. The enrich stage's homepage fetch does
+    count: it is the domain.
+    """
+    return any(a.outcome == "ok" and a.source_class not in _OFF_DOMAIN_CLASSES
+               for a in ctx.fetch_attempts.for_company(run_id, company_id))
+
+
+def _size_check_late_confirmed(ctx: RunContext, run_id: int, research_ids: list[int],
+                               budget: CreditBudget, summary: RunSummary) -> list[int]:
+    """Enrich the companies research confirmed after their homepage failed.
+
+    Returns the companies still in the run. One whose facts now put it over
+    the cap is excluded exactly as the enrich stage would have: recorded as
+    `excluded_size`, and dropped from classification, contacts and
+    synthesis. The facts purchase follows the enrich stage's own budget and
+    TTL rules, so a resume inside the TTL does not pay for them again.
+    """
+    kept: list[int] = []
+    for company_id in research_ids:
+        try:
+            if (ctx.runs.stage_status(run_id, company_id, "enrich")
+                    == "skipped_domain_unconfirmed"
+                    and _domain_confirmed(ctx, run_id, company_id)):
+                status, error = _company_facts(ctx, ctx.companies.get(company_id),
+                                               budget, summary)
+                company = ctx.companies.get(company_id)
+                if exceeds_cap(company.headcount, company.headcount_band,
+                               ctx.config.discovery.headcount_max):
+                    status, error = "excluded_size", None
+                ctx.runs.set_stage(run_id, company_id, "enrich", status, error=error)
+                if status == "excluded_size":
+                    summary.excluded_size += 1
+                    continue
+        except Exception as exc:
+            # As in the enrich stage: a size we failed to learn is unknown,
+            # and unknown never drops a company.
+            summary.errors.append(f"enrich {company_id}: {exc}")
+        kept.append(company_id)
+    return kept
+
+
 @dataclass(frozen=True)
 class _SurfaceSweep:
     """How a company's surfaces fared: how many were reached, and what broke."""
@@ -256,11 +514,13 @@ class _SurfaceSweep:
 
 
 def _profile_and_extract(ctx: RunContext, run_id: int, company_id: int,
-                         summary: RunSummary) -> _SurfaceSweep:
+                         summary: RunSummary,
+                         postings: Sequence[PostingRef] = ()) -> _SurfaceSweep:
     company = ctx.companies.get(company_id)
     completed = 0
     errors: list[str] = []
-    github_org = None  # V1 never resolves one; see the skip record below.
+    # Learned from the homepage by the enrich stage; see the skip record below.
+    github_org = company.github_org
     for target in surface_targets(company.canonical_domain, github_org=github_org):
         try:
             _sweep_surface(ctx, run_id, company_id, company.canonical_domain,
@@ -273,12 +533,20 @@ def _profile_and_extract(ctx: RunContext, run_id: int, company_id: int,
             continue
         completed += 1
 
+    try:
+        _sweep_postings(ctx, run_id, company_id, company.canonical_domain,
+                        postings, summary)
+    except Exception as exc:
+        # Postings are extra corroboration, not a surface: losing them must
+        # not count against the company or discard the surfaces already read.
+        errors.append(f"job_posting: {exc}")
+
     if github_org is None:
         # `surface_targets` silently leaves GitHub out of the list whenever
-        # there's no org to check -- which is always, in V1. Recording that
-        # as a FetchAttempt (rather than nothing at all) makes the gap show
-        # up in the report's coverage log instead of looking like GitHub
-        # was never even considered.
+        # the homepage linked no org. Recording that as a FetchAttempt
+        # (rather than nothing at all) makes the gap show up in the report's
+        # coverage log instead of looking like GitHub was never even
+        # considered.
         try:
             ctx.fetch_attempts.insert(run_id, FetchAttempt(
                 company_id, SourceClass.GITHUB, "", "skipped_no_github_org", None, 0))
@@ -290,13 +558,66 @@ def _profile_and_extract(ctx: RunContext, run_id: int, company_id: int,
 
 def _sweep_surface(ctx: RunContext, run_id: int, company_id: int, domain: str,
                    target: SurfaceTarget, summary: RunSummary) -> None:
-    outcome = ctx.fetcher.get(target.url)
-    if outcome.outcome != "ok" or not outcome.body:
-        ctx.fetch_attempts.insert(run_id, FetchAttempt(
-            company_id, target.source_class, target.url,
-            outcome.outcome, outcome.status, 0))
+    cls = target.source_class
+    page = _fetch_surface(ctx, run_id, company_id, target)
+    if page is None:
         return
+    discovery = ctx.config.discovery
+    if cls is SourceClass.ENG_BLOG:
+        _sweep_blog(ctx, run_id, company_id, domain, cls, page, summary,
+                    limit=discovery.max_blog_posts)
+    elif cls is SourceClass.PRESS:
+        # A press page is a blog in all but name: an index of dated posts.
+        # Only its own section is followed -- see `find_blog_links`.
+        _sweep_blog(ctx, run_id, company_id, domain, cls, page, summary,
+                    limit=discovery.max_press_posts, own_section_only=True)
+    elif cls is SourceClass.CHANGELOG:
+        _sweep_changelog(ctx, run_id, company_id, domain, page, summary)
+    elif cls is SourceClass.DEV_DOCS:
+        # Recorded, never extracted: API reference says what a company ships
+        # to developers -- a hook for the email -- but nothing about where it
+        # hurts, and it would only feed the LLM pages of endpoint tables.
+        _record_attempt(ctx, run_id, company_id, cls, page, 0)
+    elif cls is SourceClass.GITHUB:
+        _sweep_github(ctx, run_id, company_id, domain, page, summary)
+    else:
+        _ingest(ctx, run_id, company_id, domain, cls, page, summary)
 
+
+def _fetch_surface(ctx: RunContext, run_id: int, company_id: int,
+                   target: SurfaceTarget) -> FetchOutcome | None:
+    """The target's first URL that answers with a page, or None if none does.
+
+    Alternates are tried in order only after the primary misses (a site's
+    press page may live at /news). Every miss is recorded as it happens; the
+    page that answers is returned unrecorded, since how many documents it
+    yields is known only once it has been read.
+    """
+    for url in (target.url, *target.alternates):
+        page = ctx.fetcher.get(url)
+        if page.outcome == "ok" and page.body:
+            return page
+        _record_attempt(ctx, run_id, company_id, target.source_class, page, 0)
+    return None
+
+
+def _record_attempt(ctx: RunContext, run_id: int, company_id: int,
+                    source_class: SourceClass, outcome: FetchOutcome,
+                    documents: int) -> None:
+    ctx.fetch_attempts.insert(run_id, FetchAttempt(
+        company_id, source_class, outcome.url, outcome.outcome, outcome.status,
+        documents))
+
+
+def _ingest(ctx: RunContext, run_id: int, company_id: int, domain: str,
+            source_class: SourceClass, outcome: FetchOutcome, summary: RunSummary,
+            page_dated: bool = False) -> None:
+    """Store one fetched page and extract its claims.
+
+    `page_dated` reads the publication date out of the page's own markup,
+    for individual posts; without it the date is the fetch date for
+    current-state surfaces and None for everything else.
+    """
     # Both the LLM and the substring guard must see the SAME text, or an
     # honest quote that merely crosses an inline tag (or carries an entity
     # like &rsquo;) is rejected, while a quote that literally preserves
@@ -304,16 +625,31 @@ def _sweep_surface(ctx: RunContext, run_id: int, company_id: int, domain: str,
     # user pastes into an email. `outcome.body` is raw HTTP response text --
     # extract plain prose from it before either side ever looks at it.
     text = html_to_text(outcome.body)
+    if page_dated:
+        published_at = parse_published_date(outcome.body)
+    else:
+        published_at = ctx.today if source_class in CURRENT_STATE_CLASSES else None
+    # Recorded before extraction, as it always was: a page that answered
+    # confirms the domain even if the LLM call on it then fails.
+    _record_attempt(ctx, run_id, company_id, source_class, outcome, 1)
+    _ingest_text(ctx, run_id, company_id, domain, source_class, outcome.url,
+                 outcome.status, text, published_at, summary)
+
+
+def _ingest_text(ctx: RunContext, run_id: int, company_id: int, domain: str,
+                 source_class: SourceClass, url: str, status: int | None,
+                 text: str, published_at: date | None, summary: RunSummary) -> None:
+    """Store one document's plain text and extract its claims.
+
+    `text` is exactly what the LLM reads and what the substring guard checks
+    quotes against. The caller records the fetch attempt: one fetch can
+    yield several documents (changelog entries, repos).
+    """
     content_hash = ctx.cache.store(text.encode("utf-8"))
-    published_at = (
-        ctx.today if target.source_class in CURRENT_STATE_CLASSES else None
-    )
-    doc = SourceDocument(None, company_id, target.url, target.source_class,
+    doc = SourceDocument(None, company_id, url, source_class,
                          domain, published_at, datetime.now(),
-                         outcome.status or 200, content_hash)
+                         status or 200, content_hash)
     doc_id = ctx.documents.insert(doc)
-    ctx.fetch_attempts.insert(run_id, FetchAttempt(
-        company_id, target.source_class, target.url, "ok", outcome.status, 1))
 
     result = extract_and_persist(run_id, doc, text, ctx.llm,
                                  ctx.evidence, document_id=doc_id)
@@ -321,8 +657,143 @@ def _sweep_surface(ctx: RunContext, run_id: int, company_id: int, domain: str,
     summary.quotes_rejected += result.rejected
 
 
-def _resolve_contacts(ctx: RunContext, company_id: int, role_title: str) -> None:
+def _sweep_changelog(ctx: RunContext, run_id: int, company_id: int, domain: str,
+                     page: FetchOutcome, summary: RunSummary) -> None:
+    """Read each dated release as its own document, newest first.
+
+    A changelog page spans years; read whole, its one date would be the
+    fetch date or none, and a two-year-old workaround would sit beside last
+    week's fix. Split into entries, each claim carries the date of the
+    release that made it. A page with no dated headings is read whole and
+    undated, as before, so an unusual layout is not lost.
+    """
+    entries = split_changelog(page.body or "")
+    if not entries:
+        _ingest(ctx, run_id, company_id, domain, SourceClass.CHANGELOG, page, summary)
+        return
+    entries = entries[:ctx.config.discovery.max_changelog_entries]
+    _record_attempt(ctx, run_id, company_id, SourceClass.CHANGELOG, page, len(entries))
+    for entry in entries:
+        # Two entries on one day share this url; their text differs, and
+        # documents are keyed on (url, content_hash), so both are kept.
+        _ingest_text(ctx, run_id, company_id, domain, SourceClass.CHANGELOG,
+                     f"{page.url}#{entry.published_at.isoformat()}", page.status,
+                     f"{entry.heading}\n{entry.text}", entry.published_at, summary)
+
+
+def _sweep_github(ctx: RunContext, run_id: int, company_id: int, domain: str,
+                  page: FetchOutcome, summary: RunSummary) -> None:
+    """Read the org's recently pushed repos, each dated by its last push.
+
+    The publisher is still the company: the org was found on its own
+    homepage, so a repo there is first-party evidence of what it is building.
+    """
+    repos = parse_repos(page.body or "", ctx.today, ctx.config.gate.recency_days,
+                        ctx.config.discovery.max_github_repos)
+    _record_attempt(ctx, run_id, company_id, SourceClass.GITHUB, page, len(repos))
+    for repo in repos:
+        _ingest_text(ctx, run_id, company_id, domain, SourceClass.GITHUB, repo.url,
+                     page.status, f"{repo.name}: {repo.description}", repo.pushed_at,
+                     summary)
+
+
+def _sweep_blog(ctx: RunContext, run_id: int, company_id: int, domain: str,
+                cls: SourceClass, index: FetchOutcome, summary: RunSummary,
+                limit: int, own_section_only: bool = False) -> None:
+    """Read individual posts, not the index's front page.
+
+    A blog index is a wall of teasers with no dates, and mixes marketing in
+    with engineering writing. The posts carry the substance and their own
+    publication dates, and most blogs have an engineering section that
+    holds the ones worth reading. If no post links can be found the index
+    itself is read, as before, so a blog with unusual markup is not lost.
+    Press pages are read the same way, at most `limit` posts either way, but
+    with `own_section_only`: a press index that links the eng blog must not
+    re-read its posts as press.
+
+    `index` is the page that answered, which may be an alternate: post
+    links are resolved against it, so /news finds its /news/... posts.
+    """
+    links = find_blog_links(index.body or "", index.url, own_section_only=own_section_only)
+    candidates = links.posts
+    discovery = [index]
+    if links.engineering_index:
+        eng = ctx.fetcher.get(links.engineering_index)
+        discovery.append(eng)
+        if eng.outcome == "ok" and eng.body:
+            eng_posts = find_blog_links(eng.body, links.engineering_index).posts
+            if eng_posts:
+                candidates = eng_posts
+
+    if not candidates:
+        for page in discovery[1:]:
+            _record_attempt(ctx, run_id, company_id, cls, page, 0)
+        _ingest(ctx, run_id, company_id, domain, cls, index, summary)
+        return
+
+    for page in discovery:
+        _record_attempt(ctx, run_id, company_id, cls, page, 0)
+
+    # Listed posts can 404 (unpublished cards, moved URLs), so keep going past
+    # failures, but never spend more than twice the budget doing it.
+    read = tried = 0
+    for url in candidates:
+        if read >= limit or tried >= 2 * limit:
+            break
+        tried += 1
+        post = ctx.fetcher.get(url)
+        if post.outcome == "ok" and post.body:
+            _ingest(ctx, run_id, company_id, domain, cls, post, summary, page_dated=True)
+            read += 1
+        else:
+            _record_attempt(ctx, run_id, company_id, cls, post, 0)
+
+
+def _sweep_postings(ctx: RunContext, run_id: int, company_id: int, domain: str,
+                    postings: Sequence[PostingRef], summary: RunSummary) -> None:
+    """Read the postings this company was discovered through.
+
+    A posting for the very role being researched is first-party, current
+    evidence, and a different source class from a blog post -- which is what
+    lets a finding be corroborated at all.
+    """
+    seen: set[str] = set()
+    for posting in postings:
+        if len(seen) >= ctx.config.discovery.max_job_postings:
+            break
+        if posting.url in seen:
+            continue
+        seen.add(posting.url)
+        outcome = ctx.fetcher.get(posting.url)
+        if outcome.outcome != "ok" or not outcome.body:
+            _record_attempt(ctx, run_id, company_id, SourceClass.JOB_POSTING, outcome, 0)
+            continue
+        _ingest(ctx, run_id, company_id, domain, SourceClass.JOB_POSTING, outcome, summary)
+
+
+def facts_of(company: Company) -> CompanyFacts | None:
+    """The company's stored facts in the shape the stage classifier reads.
+
+    None when nothing about its size, age or funding is known, so the
+    classifier takes its no-facts path; tags alone say nothing about stage.
+    """
+    if (company.headcount is None and not company.headcount_band
+            and company.founded_year is None and not company.funding_rounds):
+        return None
+    return CompanyFacts(company.headcount, company.headcount_band, company.founded_year,
+                        company.funding_rounds, company.tags,
+                        company.headcount_source or "hunter")
+
+
+def _resolve_contacts(ctx: RunContext, company_id: int,
+                      role_title: str) -> list[PersonRef]:
+    """Store the company's ranked contacts; return the ones with no profile.
+
+    Those are the candidates for a paid LinkedIn lookup, which the caller
+    buys only after every company's contact search (see `_link_profiles`).
+    """
     company = ctx.companies.get(company_id)
+    unlinked: list[PersonRef] = []
     keywords = role_title.lower().split()
     people = ctx.contact_provider.find(company.canonical_domain, keywords)
     for person, _score in rank_contacts(people, company.headcount, keywords,
@@ -357,41 +828,98 @@ def _resolve_contacts(ctx: RunContext, company_id: int, role_title: str) -> None
             profile_url=person.profile_url, email=email, email_status=status,
         )
         ctx.contacts.upsert(company_id, resolved, "provider", datetime.now())
+        if person.profile_url is None and (prior is None or prior.profile_url is None):
+            # A profile we already stored is kept by the upsert's COALESCE,
+            # so it is never bought twice.
+            unlinked.append(resolved)
+    return unlinked
+
+
+def _link_profiles(ctx: RunContext, company_id: int, people: Sequence[PersonRef],
+                   budget: CreditBudget, summary: RunSummary) -> None:
+    """Buy LinkedIn profiles for stored contacts, in rank order, while budget lasts."""
+    company = ctx.companies.get(company_id)
+    for person in people:
+        profile_url = _lookup_profile(ctx, company, person.full_name, budget, summary)
+        if profile_url is not None:
+            ctx.contacts.upsert(company_id, replace(person, profile_url=profile_url),
+                                "provider", datetime.now())
+
+
+def _lookup_profile(ctx: RunContext, company: Company, full_name: str,
+                    budget: CreditBudget, summary: RunSummary) -> str | None:
+    """One paid lookup of a ranked contact's LinkedIn profile, or None.
+
+    A failure is this person's, not the company's: the contact and its
+    verified address are still worth storing without a profile link.
+    """
+    names = full_name.split()
+    # The finder is asked by first and last name; one token is not a name it
+    # can match, and a credit spent on it buys nothing.
+    if (len(names) < 2 or not ctx.config.hunter.linkedin_lookup
+            or not budget.try_spend(ctx.config.hunter.finder_cost)):
+        return None
+    try:
+        return ctx.contact_provider.find_profile(company.canonical_domain,
+                                                 names[0], names[-1])
+    except Exception as exc:
+        summary.errors.append(f"linkedin {company.id} {full_name}: {exc}")
+        return None
 
 
 def _synthesize(ctx: RunContext, run_id: int, company_id: int,
                 summary: RunSummary) -> None:
-    """Pick the strongest theme that clears the gate, or record why none did.
+    """Record what the company is building: up to `max_findings_per_company`
+    themes that clear the gate, or one row saying why none did.
+
+    Only building themes are candidates. A funding round or a new office
+    already did its work in stage classification, and "they raised a Series
+    A" is not something a company is building.
 
     The gate is evaluated per theme, never across the whole pile: two
-    unrelated complaints from two surfaces are not one corroborated
-    bottleneck, and evaluating them together would manufacture the
-    independence the gate exists to demand.
+    unrelated claims from two surfaces are not one corroborated finding, and
+    evaluating them together would manufacture the independence the gate
+    exists to demand.
     """
-    items = ctx.evidence.for_company(run_id, company_id)
-    passing: list[tuple[str, list[EvidenceItem], GateVerdict]] = []
-    for theme, cluster in cluster_by_theme(items).items():
+    building = [i for i in ctx.evidence.for_company(run_id, company_id)
+                if i.theme in BUILDING_THEMES]
+    passing: list[tuple[int, str, list[EvidenceItem], GateVerdict]] = []
+    for theme, cluster in cluster_by_theme(building).items():
         verdict = evaluate(cluster, ctx.config.gate, ctx.today)
         if verdict.passed:
-            passing.append((theme, cluster, verdict))
+            passing.append((_independent_sources(cluster), theme, cluster, verdict))
 
-    # Most corroborated theme wins; the theme name breaks ties so two runs
-    # over the same evidence always pick the same bottleneck.
-    best = min(passing, key=lambda t: (-len(t[1]), t[0]), default=None)
+    # Most independently sourced first, then most quoted; the theme name
+    # breaks ties so two runs over the same evidence keep the same findings.
+    passing.sort(key=lambda p: (-p[0], -len(p[2]), p[1]))
+    findings = []
+    for sources, theme, cluster, verdict in passing[:ctx.config.gate.max_findings_per_company]:
+        quotes = [i.quote for i in cluster]
+        findings.append(Finding(
+            None, company_id, theme, cluster[0].claim,
+            ctx.llm.write_summary(cluster[0].claim, quotes),
+            corroborated=sources >= 2, passed=True, reason="passed",
+            evidence_ids=verdict.evidence_ids))
 
-    if best is None:
-        ctx.bottlenecks.insert(run_id, Bottleneck(
-            None, company_id, "", "", False, _failure_reason(ctx, items), ()))
-        summary.no_bottleneck += 1
+    # Cleared only once every summary is written: a `write_summary` that
+    # raises part-way leaves the previous attempt's rows, not half of these.
+    # Cleared at all because `findings` has no unique key, so a resumed
+    # synthesis would otherwise stack a second copy of every row.
+    ctx.findings.clear_for_company(run_id, company_id)
+    if not findings:
+        ctx.findings.insert(run_id, Finding(
+            None, company_id, "", "", "", False, False,
+            _failure_reason(ctx, building), ()))
+        summary.no_findings += 1
         return
-
-    _theme, cluster, verdict = best
-    quotes = [i.quote for i in cluster]
-    ctx.bottlenecks.insert(run_id, Bottleneck(
-        None, company_id, cluster[0].claim,
-        ctx.llm.write_summary(cluster[0].claim, quotes),
-        True, verdict.reason, verdict.evidence_ids))
+    for finding in findings:
+        ctx.findings.insert(run_id, finding)
     summary.evidenced += 1
+
+
+def _independent_sources(cluster: Sequence[EvidenceItem]) -> int:
+    """How many independent sources back a cluster -- the gate's own key."""
+    return len({(i.source_class, i.publisher_domain) for i in cluster})
 
 
 def _failure_reason(ctx: RunContext, items: Sequence[EvidenceItem]) -> str:

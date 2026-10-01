@@ -160,3 +160,49 @@ def test_job_with_bare_string_location_does_not_raise():
     client = httpx.Client(transport=httpx.MockTransport(_handler_for(payload)))
     source = GreenhouseBoardSource(Fetcher(client, sleep=lambda s: None), ("acme",))
     assert source.search(["backend engineer"], region="US") == []
+
+
+def _gh_source(payload):
+    client = httpx.Client(transport=httpx.MockTransport(_handler_for(payload)))
+    return GreenhouseBoardSource(Fetcher(client, sleep=lambda s: None), ("acme",))
+
+
+def test_greenhouse_reads_mode_from_posting_content():
+    payload = {"jobs": [
+        {"title": "Backend Engineer",
+         "absolute_url": "https://boards.greenhouse.io/acme/jobs/5",
+         "location": {"name": "New York, NY"},
+         "content": "&lt;p&gt;3 days a week in the office&lt;/p&gt;"},
+    ]}
+    [posting] = _gh_source(payload).search(["backend engineer"], region="US")
+    assert posting.work_mode == "hybrid"
+
+
+def test_greenhouse_tags_employment_and_tolerates_non_string_content():
+    payload = {"jobs": [
+        {"title": "Backend Engineer Intern", "location": {"name": "Chicago, IL"},
+         "content": 42},
+        {"title": "Backend Engineer", "location": {"name": "Chicago, IL"},
+         "content": "&lt;p&gt;This is a full-time role.&lt;/p&gt;"},
+    ]}
+    found = _gh_source(payload).search(["backend engineer"], region="US")
+    assert [p.employment_type for p in found] == ["other", "full_time"]
+
+
+def test_greenhouse_requests_the_board_with_content():
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(404)
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    GreenhouseBoardSource(Fetcher(client, sleep=lambda s: None), ("acme",)).search(["x"], "US")
+    assert any(u.endswith("/boards/acme/jobs?content=true") for u in seen)
+
+
+def test_matches_region_country_overrides_location_text():
+    from outreach.sources.jobboards.region import matches_region
+    assert matches_region("Remote", "US", "United States") is True
+    assert matches_region("Remote - US", "US", "CA") is False
+    assert matches_region("Remote", "US", None) is False   # no evidence either way
+    assert matches_region("London, UK", "EU", "GB") is True  # only US is scoped

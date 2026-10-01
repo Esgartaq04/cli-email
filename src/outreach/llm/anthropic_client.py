@@ -6,11 +6,13 @@ from typing import Sequence
 
 import httpx
 
+from outreach.core.clustering import normalize_theme
+from outreach.core.themes import ALL_THEMES
 from outreach.llm.base import RawClaim
 
 _API_URL = "https://api.anthropic.com/v1/messages"
 _API_VERSION = "2023-06-01"
-_MODEL = "claude-3-5-sonnet-20241022"
+_MODEL = "claude-sonnet-5"
 
 _EXPAND_SYSTEM = (
     "You expand a single job title into a short list of closely related job "
@@ -19,22 +21,52 @@ _EXPAND_SYSTEM = (
     "No prose, no markdown fences, no commentary."
 )
 
+# The theme list itself lives in core/themes.py (it is closed, because
+# clustering is exact-match on the theme: a slug the model invents per page
+# never collides across sources, so nothing could be corroborated). There is
+# deliberately no catch-all: two unrelated "other" claims would cluster and
+# could pass the gate together. Only the prompt wording for each slug lives here.
+_THEME_DESCRIPTIONS = {
+    "product-launch": "shipped or launched a product/feature",
+    "active-build": "currently building or about to build",
+    "platform-infra": "internal platform or infrastructure work",
+    "ai-ml": "AI/ML features or models",
+    "public-api-sdk": "public API, SDK, integrations",
+    "open-source": "open-source projects",
+    "new-market": "entering a new market, segment or region",
+    "funding-round": "a named funding round, IPO or acquisition of the company",
+    "new-office": "opening an office or hub",
+    "acquisition": "the company acquiring another company",
+    "headcount-statement": "a stated team or employee count",
+    "new-product-line": "launching a distinct new product line",
+}
+
+# Driven by ALL_THEMES so the prompt can never list a slug the parser rejects
+# (or omit one it accepts); a slug without a description fails at import.
+_THEME_HELP = ", ".join(
+    f"{slug} ({_THEME_DESCRIPTIONS[slug]})" for slug in ALL_THEMES)
+
 _EXTRACT_SYSTEM = (
-    "You extract factual claims about engineering-team pain points (scaling "
-    "bottlenecks, manual toil, operational strain) from the given page text. "
+    "You extract factual claims about what a company is building, shipping or "
+    "working on, and about its growth stage, from the given page text. Only "
+    "claims about the company itself qualify: skip customer testimonials, "
+    "perks and benefits, and generic job responsibilities. For a job posting, "
+    "keep only statements describing what the team is building or the "
+    "initiative the hire joins. "
     "Every quote you return MUST be copied verbatim, character-for-character, "
     "from the supplied text -- never paraphrased or invented. Respond with "
     "strict JSON only: a JSON array of objects, each with exactly the keys "
-    '"claim" (a short paraphrase), "quote" (the verbatim excerpt), and "theme" '
-    "(a short slug grouping related claims). Return an empty array if there is "
+    '"claim" (a short paraphrase), "quote" (the verbatim excerpt), and "theme". '
+    "The theme MUST be exactly one of these slugs: " + _THEME_HELP + ". If a "
+    "claim fits none of them, leave it out. Return an empty array if there is "
     "nothing relevant. No prose, no markdown fences, no commentary."
 )
 
 _SUMMARY_SYSTEM = (
-    "You write a two-to-three sentence, neutral, factual summary of a "
-    "corroborated engineering bottleneck, grounded only in the claim and "
-    "quotes given to you. Respond with strict JSON only: a JSON object with "
-    'exactly the key "summary" holding the summary text. No prose, no '
+    "You write a two-to-three sentence, neutral, factual summary of what a "
+    "company is building and where it is heading, grounded only in the claim "
+    "and quotes given to you. Respond with strict JSON only: a JSON object "
+    'with exactly the key "summary" holding the summary text. No prose, no '
     "markdown fences, no commentary."
 )
 
@@ -128,6 +160,9 @@ class AnthropicLLM:
             theme = item.get("theme")
             if not (isinstance(claim, str) and isinstance(quote, str)
                     and isinstance(theme, str)):
+                continue
+            theme = normalize_theme(theme)
+            if theme not in ALL_THEMES:
                 continue
             claims.append(RawClaim(claim=claim, quote=quote, theme=theme))
         return claims

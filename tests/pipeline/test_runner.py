@@ -1,11 +1,12 @@
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime
 
 import pytest
 
+from outreach.net.fetcher import FetchOutcome
 from outreach.pipeline.runner import run_pipeline
 from outreach.types import PersonRef, SourceClass
-from tests.pipeline.factories import build_context
+from tests.pipeline.factories import build_context, company_id
 
 
 def _raise_on(ctx, fragment: str, error: BaseException, once: bool = False):
@@ -41,6 +42,9 @@ class CountingProvider:
     def find(self, domain, role_keywords):
         return self.inner.find(domain, role_keywords)
 
+    def find_profile(self, domain, first_name, last_name):
+        return self.inner.find_profile(domain, first_name, last_name)
+
     def verify(self, email):
         self.verify_calls.append(email)
         return self.inner.verify(email)
@@ -54,7 +58,19 @@ def test_happy_path_produces_an_evidenced_company():
     summary = run_pipeline(ctx, "Backend Engineer", "fintech")
     assert summary.companies == 2
     assert summary.evidenced == 1
-    assert summary.no_bottleneck == 1
+    assert summary.no_findings == 1
+
+    # good.example's three quotes share one building theme across three
+    # independent surfaces: one corroborated finding. thin.example quoted
+    # nothing, so its one row is a miss that says why.
+    good = company_id(ctx, "good.example")
+    assert [(f.theme, f.corroborated, f.passed, len(f.evidence_ids))
+            for f in ctx.findings.for_company(summary.run_id, good)] == [
+        ("active-build", True, True, 3)]
+    thin = company_id(ctx, "thin.example")
+    assert [(f.passed, f.reason)
+            for f in ctx.findings.for_company(summary.run_id, thin)] == [
+        (False, "no_evidence")]
 
 
 def test_one_company_failing_does_not_abort_the_run():
@@ -65,9 +81,19 @@ def test_one_company_failing_does_not_abort_the_run():
 
 
 def test_quota_shortfall_marks_companies_skipped_not_missing():
-    ctx = build_context(credits=1)
+    """One shared budget: enrichment spends first, so two credits buy both
+    companies' facts and leave nothing for contacts -- which is recorded as
+    a quota skip, never as a company that silently went missing."""
+    ctx = build_context(credits=2)
     summary = run_pipeline(ctx, "Backend Engineer", "fintech")
-    assert summary.skipped_quota == 1
+    good = company_id(ctx, "good.example")
+    thin = company_id(ctx, "thin.example")
+    for cid in (good, thin):
+        assert ctx.runs.stage_status(summary.run_id, cid, "enrich") == "ok"
+        assert ctx.runs.stage_status(summary.run_id, cid, "contacts") == "skipped_quota"
+    assert ctx.facts_provider.calls == ["good.example", "thin.example"]
+    assert ctx.contact_provider.find_calls == []
+    assert summary.skipped_quota == 2
     assert summary.companies == 2
 
 
@@ -90,24 +116,35 @@ def test_only_current_state_surfaces_are_dated_with_the_fetch_date():
     ctx = build_context()
     summary = run_pipeline(ctx, "Backend Engineer", "fintech")
 
-    good = ctx.companies.upsert("good.example", "Good Co", None, None)
+    good = company_id(ctx, "good.example")
+    dates: dict[SourceClass, set] = {}
+    for doc in ctx.documents.for_company(good):
+        dates.setdefault(doc.source_class, set()).add(doc.published_at)
+
+    # Current state: what the page says is true today.
+    assert dates[SourceClass.CAREERS_PAGE] == {ctx.today}
+    assert dates[SourceClass.ABOUT] == {ctx.today}
+    # Dated archives: their own dates, or none -- never the fetch date.
+    assert dates[SourceClass.ENG_BLOG] == {None}  # the index states no date
+    assert dates[SourceClass.CHANGELOG] == {date(2026, 9, 12), date(2026, 8, 1)}
+    assert dates[SourceClass.PRESS] == {date(2026, 9, 2)}
+    assert dates[SourceClass.GITHUB] == {date(2026, 9, 15)}
+
+    # The evidence carries its document's date.
     by_class = {i.source_class: i.published_at
                 for i in ctx.evidence.for_company(summary.run_id, good)}
-
     assert by_class[SourceClass.CAREERS_PAGE] == ctx.today
-    assert by_class[SourceClass.ENG_BLOG] is None
-    assert by_class[SourceClass.CHANGELOG] is None
+    assert by_class[SourceClass.CHANGELOG] == date(2026, 9, 12)
 
 
 def test_a_failed_company_gets_no_fabricated_verdict():
-    """`no bottleneck found` about a company we never researched is a lie."""
+    """`no findings` about a company we never researched is a lie."""
     ctx = build_context(explode_on_domain="bad.example")
     summary = run_pipeline(ctx, "Backend Engineer", "fintech")
 
     bad = ctx.companies.upsert("bad.example", "Bad Co", None, None)
     assert ctx.runs.stage_status(summary.run_id, bad, "evidence") == "failed"
-    verdicts = [b.company_id for b in ctx.bottlenecks.for_run(summary.run_id)]
-    assert bad not in verdicts
+    assert bad not in [f.company_id for f in ctx.findings.for_run(summary.run_id)]
 
 
 def test_a_malformed_posting_does_not_cost_the_other_companies():
@@ -119,20 +156,49 @@ def test_a_malformed_posting_does_not_cost_the_other_companies():
     assert summary.failures == 1
     assert any("Broken Co" in e for e in summary.errors)
     assert summary.evidenced == 1
-    assert summary.no_bottleneck == 1
+    assert summary.no_findings == 1
 
 
 def test_the_skipped_github_surface_is_recorded_not_invisible():
-    """V1 never resolves a GitHub org, so the surface is always left out of
+    """A company whose homepage links no GitHub org has no GitHub target in
     `surface_targets`. That gap must show up in the coverage log as a
     recorded skip, not vanish as if GitHub were never even considered."""
     ctx = build_context()
     summary = run_pipeline(ctx, "Backend Engineer", "fintech")
-    good = ctx.companies.upsert("good.example", "Good Co", None, None)
-    attempts = ctx.fetch_attempts.for_company(summary.run_id, good)
+    thin = company_id(ctx, "thin.example")  # its homepage links no GitHub org
+    attempts = ctx.fetch_attempts.for_company(summary.run_id, thin)
     github_attempts = [a for a in attempts if a.source_class == SourceClass.GITHUB]
     assert len(github_attempts) == 1
     assert github_attempts[0].outcome == "skipped_no_github_org"
+
+    # good.example's org is known, so its repos are fetched, not skipped.
+    good = company_id(ctx, "good.example")
+    assert [a.outcome for a in ctx.fetch_attempts.for_company(summary.run_id, good)
+            if a.source_class == SourceClass.GITHUB] == ["ok"]
+
+
+def test_a_github_fetch_does_not_confirm_a_guessed_domain():
+    """api.github.com answering says nothing about whether the company's own
+    domain is real, exactly like a job-board-hosted posting."""
+    ctx = build_context(include_unconfirmed_domain=True)
+    # An org remembered from an earlier run, when the homepage still answered.
+    ghost = ctx.companies.upsert("ghost.example", "Ghost Co", None, None)
+    ctx.companies.set_github_org(ghost, "ghostco")
+    real = ctx.fetcher.get
+
+    def get(url):
+        if url.startswith("https://api.github.com/orgs/ghostco/repos"):
+            return FetchOutcome(url, 200, "[]", "ok")
+        return real(url)
+
+    ctx.fetcher.get = get
+    summary = run_pipeline(ctx, "Backend Engineer", "fintech")
+
+    assert [a.outcome for a in ctx.fetch_attempts.for_company(summary.run_id, ghost)
+            if a.source_class is SourceClass.GITHUB] == ["ok"]
+    assert ctx.runs.stage_status(summary.run_id, ghost, "contacts") == (
+        "skipped_domain_unconfirmed")
+    assert "ghost.example" not in ctx.contact_provider.find_calls
 
 
 def test_a_company_whose_domain_was_never_confirmed_is_not_enriched():
@@ -191,7 +257,7 @@ def test_a_failing_finish_still_returns_the_summary():
     summary = run_pipeline(ctx, "Backend Engineer", "fintech")
 
     assert summary.evidenced == 1
-    assert summary.no_bottleneck == 1
+    assert summary.no_findings == 1
     assert any("db locked" in e for e in summary.errors)
 
 
@@ -207,9 +273,11 @@ def test_one_failing_surface_still_lets_the_company_reach_a_verdict():
     assert summary.evidenced == 1
     assert any("changelog blew up" in e for e in summary.errors)
 
-    verdicts = {b.company_id: b.passed
-                for b in ctx.bottlenecks.for_run(summary.run_id)}
-    assert verdicts[good] is True
+    # The careers and blog quotes still agree on one theme: the finding stands,
+    # corroborated, without the changelog.
+    assert [(f.theme, f.corroborated, f.passed)
+            for f in ctx.findings.for_company(summary.run_id, good)] == [
+        ("active-build", True, True)]
 
 
 def test_a_company_whose_every_surface_fails_is_marked_failed():
@@ -243,9 +311,13 @@ def test_resuming_after_a_crash_does_not_duplicate_evidence():
     rows = ctx.evidence.for_company(run_id, good)
     assert len(rows) == 3  # not 5
     assert len({r.quote for r in rows}) == 3
-    # 4 real surfaces + 1 synthetic "skipped_no_github_org" record; not
-    # doubled to 10 by the interrupted partial attempt.
-    assert len(ctx.fetch_attempts.for_company(run_id, good)) == 5
+    # 1 homepage fetch from the enrich stage (kept across the evidence
+    # stage's re-derivation, since it is what confirms the domain) + careers,
+    # blog, changelog and about (1 each) + press (/press 404, the /news index,
+    # its one post) + dev docs (/docs 404, /developers) + the GitHub repos
+    # call + 1 job-posting read (the fixture's posting URL is unfetchable);
+    # not doubled by the interrupted partial attempt.
+    assert len(ctx.fetch_attempts.for_company(run_id, good)) == 12
     assert summary.quotes_accepted == 3
 
 
@@ -375,13 +447,12 @@ def test_a_set_stage_failure_for_one_company_does_not_abort_the_run():
     assert any("database is locked" in e for e in summary.errors)
     assert ctx.runs.stage_status(summary.run_id, good, "evidence") == "failed"
 
-    # No fabricated verdict for the company whose checkpoint write failed.
-    verdicts = {b.company_id: b.passed for b in ctx.bottlenecks.for_run(summary.run_id)}
-    assert good not in verdicts
+    # No fabricated finding (or miss) for the company whose checkpoint write
+    # failed.
+    assert ctx.findings.for_company(summary.run_id, good) == []
 
     # The other company was never touched by the injected failure and still
-    # reached a verdict.
+    # reached its no-findings verdict.
     thin = ctx.companies.upsert("thin.example", "Thin Co", None, None)
-    assert thin in verdicts
-    assert verdicts[thin] is False  # thin.example is the no-bottleneck company
-    assert summary.no_bottleneck == 1
+    assert [f.passed for f in ctx.findings.for_company(summary.run_id, thin)] == [False]
+    assert summary.no_findings == 1

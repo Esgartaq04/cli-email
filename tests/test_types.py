@@ -1,5 +1,5 @@
 from datetime import date
-from outreach.types import SourceClass, EvidenceItem, Contact
+from outreach.types import SourceClass, EvidenceItem, Contact, PostingRef, Company
 
 
 def test_source_class_values_are_stable_strings():
@@ -30,3 +30,13 @@ def test_unverified_contact_has_no_email():
     )
     assert c.email is None
     assert c.email_status == "unverified"
+
+
+def test_posting_ref_defaults_to_unknown_mode_and_type():
+    p = PostingRef("Co", "co.example", "Engineer", "u", "Remote")
+    assert p.work_mode == "unknown" and p.employment_type == "unknown"
+
+
+def test_company_positional_construction_still_works():
+    c = Company(1, "co.example", "Co", None, None)
+    assert c.funding_rounds == () and c.github_org is None

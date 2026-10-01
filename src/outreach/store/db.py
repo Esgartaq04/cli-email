@@ -4,6 +4,8 @@ import sqlite3
 from importlib import resources
 from pathlib import Path
 
+from outreach.store.migrations import migrate
+
 
 def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -12,5 +14,6 @@ def connect(path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     schema = resources.files("outreach.store").joinpath("schema.sql").read_text()
     conn.executescript(schema)
+    migrate(conn)
     conn.commit()
     return conn

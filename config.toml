@@ -1,18 +1,36 @@
 [gate]
-min_independent_sources = 2
+min_independent_sources = 1
 require_first_party = true
 recency_days = 180
-first_party_classes = ["job_posting", "careers_page", "eng_blog", "changelog", "github", "status_page"]
+first_party_classes = ["job_posting", "careers_page", "eng_blog", "changelog", "github", "status_page", "press", "about"]
 
 [ranking]
 max_contacts_per_company = 3
 exclude_title_patterns = ["recruit", "talent", "sourcer"]
 
 [discovery]
-headcount_min = 20
-headcount_max = 1000
+headcount_min = 1
+headcount_max = 2000
 region = "US"
-greenhouse_tokens = []
+greenhouse_tokens = ["stripe", "plaid", "brex"]
+ashby_tokens = []
+lever_tokens = []
+max_blog_posts = 5      # engineering posts read per company (each fetch waits out the 2s per-host limit)
+max_job_postings = 2    # matching job postings read per company
+
+# Optional sections; the values shown are the defaults.
+# [stage]
+# seed_max_headcount = 49
+# growth_max_headcount = 499
+# maturity_min_age_years = 12
+# maturity_min_years_since_funding = 6
+# signal_recency_days = 365
+#
+# [hunter]
+# enrichment_cost = 1
+# finder_cost = 1
+# linkedin_lookup = true
+# facts_ttl_days = 90
 
 [paths]
 db = "data/pipeline.db"

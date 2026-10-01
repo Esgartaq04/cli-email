@@ -5,12 +5,14 @@ from datetime import date
 
 from outreach.config import Config
 from outreach.contacts.base import ContactProvider
+from outreach.contacts.facts import CompanyFactsProvider
 from outreach.llm.base import LLMClient
 from outreach.net.fetcher import Fetcher
 from outreach.sources.base import JobBoardSource
 from outreach.store.cache import DocumentCache
 from outreach.store.dimensions import CompanyRepo, ContactRepo, DocumentRepo
-from outreach.store.runs import BottleneckRepo, EvidenceRepo, FetchAttemptRepo, RunRepo
+from outreach.store.runs import (EvidenceRepo, FetchAttemptRepo, FindingRepo, PostingRepo,
+                                 RunRepo)
 
 
 @dataclass
@@ -29,10 +31,12 @@ class RunContext:
     documents: DocumentRepo
     runs: RunRepo
     evidence: EvidenceRepo
-    bottlenecks: BottleneckRepo
+    findings: FindingRepo
+    postings: PostingRepo
     fetch_attempts: FetchAttemptRepo
     cache: DocumentCache
     fetcher: Fetcher
     llm: LLMClient
     job_board: JobBoardSource
     contact_provider: ContactProvider
+    facts_provider: CompanyFactsProvider
