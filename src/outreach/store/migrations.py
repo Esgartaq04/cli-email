@@ -86,6 +86,15 @@ MIGRATIONS: tuple[str, ...] = (
       posted_at TEXT NOT NULL,
       parse_method TEXT NOT NULL CHECK (parse_method IN ('parsed', 'llm')),
       status TEXT NOT NULL CHECK (status IN ('kept', 'skipped_cap', 'skipped_recent')),
+      company TEXT,
+      domain TEXT,
+      ats_kind TEXT,
+      ats_token TEXT,
+      role TEXT,
+      location TEXT,
+      work_mode TEXT,
+      employment_type TEXT,
+      html TEXT,
       UNIQUE (run_id, item_id)
     );
 

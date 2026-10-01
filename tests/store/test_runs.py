@@ -309,3 +309,19 @@ def test_company_find_canonicalizes(tmp_path):
     cid = companies.upsert("acme.io", "Acme", None, None)
     assert companies.find("https://www.Acme.io/careers").id == cid
     assert companies.find("other.io") is None
+
+
+def test_hn_post_record_keeps_the_parsed_post_and_html_for_resume(tmp_path):
+    from datetime import date
+    from outreach.store.runs import HNPostRepo
+    from outreach.types import HNPostRecord, ParsedPost
+    conn, companies, runs = _hn_db(tmp_path)
+    cid = companies.upsert("acme.io", "Acme", None, None)
+    run = runs.create("r", "s", "US", (1, 2000), datetime(2026, 9, 30))
+    parsed = ParsedPost("Acme", "acme.io", ("lever", "acme"), "Backend Engineer",
+                        "Austin, TX", "onsite", "full_time")
+    record = HNPostRecord(7, "Ask HN: Who is hiring? (September 2026)", date(2026, 9, 1),
+                          "llm", "kept", parsed, "<p>Acme | Backend Engineer")
+    HNPostRepo(conn).insert(run, cid, record)
+    assert HNPostRepo(conn).for_run(run) == [(cid, record)]
+    assert HNPostRepo(conn).for_run(run + 1) == []

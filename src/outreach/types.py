@@ -215,3 +215,8 @@ class HNPostRecord:
     posted_at: date
     parse_method: str  # "parsed" | "llm"
     status: str  # "kept" | "skipped_cap" | "skipped_recent"
+    # What the post was read as, and the post itself: a resume rebuilds this
+    # run's HN selection from these instead of re-reading a thread that has
+    # grown since, or paying the LLM fallback again.
+    parsed: ParsedPost | None = None
+    html: str = ""

@@ -130,3 +130,29 @@ def test_hn_postings_are_not_refetched():
     hn = [a for a in attempts if a.url.startswith("https://news.ycombinator.com")]
     assert [(a.source_class, a.outcome, a.document_count) for a in hn] == [
         (SourceClass.HN_POST, "ok", 1)]
+
+
+def test_resume_keeps_the_original_hn_selection():
+    from tests.pipeline.factories import hn_thread as fixture_thread
+    ctx = build_context(routes={"https://acmerobotics.com/": "<html>Acme</html>",
+                                "https://zetapay.com/": "<html>Zeta</html>"})
+    ctx.hn = FakeHNSource(fixture_thread(item_ids=[101, 102, 104, 105]))
+    ctx.config = replace(ctx.config, hn=replace(HNConfig(), max_new_companies=2))
+    first = run_pipeline(ctx, "Backend Engineer", "fintech")
+    zeta = company_id(ctx, "zetapay.com")
+    ctx.runs.set_stage(first.run_id, zeta, "synthesize", "failed")
+
+    # The thread grew: a Series C company would now rank first and push
+    # an already-kept company out of the cap. A resume must not re-select.
+    grown = (501, 'Bigco | Backend Engineer | Austin, TX | ONSITE<p>We raised a $90M Series C. '
+                  '<a href="https://bigco.dev">bigco.dev</a>')
+    ctx.hn = FakeHNSource(fixture_thread(item_ids=[101, 102, 104, 105], extra=[grown]))
+    run_pipeline(ctx, "Backend Engineer", "fintech", resume_run_id=first.run_id)
+
+    assert ctx.hn.calls == 0
+    assert ctx.companies.find("bigco.dev") is None
+    assert ctx.runs.stage_status(first.run_id, zeta, "discover") == "ok"
+    assert ctx.runs.stage_status(first.run_id, zeta, "synthesize") == "ok"
+    assert ctx.runs.stage_status(first.run_id, company_id(ctx, "quillhealth.io"),
+                                 "discover") == "skipped_cap"
+    assert any(d.source_class is SourceClass.HN_POST for d in ctx.documents.for_company(zeta))

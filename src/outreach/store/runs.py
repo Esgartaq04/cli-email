@@ -11,6 +11,7 @@ from outreach.types import (
     FetchAttempt,
     Finding,
     HNPostRecord,
+    ParsedPost,
     PostingRef,
     SourceClass,
     Stage,
@@ -344,20 +345,42 @@ class HNPostRepo:
 
     def insert(self, run_id: int, company_id: int, record: HNPostRecord) -> None:
         # A resume re-runs discovery; the post is the same post.
+        p = record.parsed
         self.conn.execute(
             """INSERT OR IGNORE INTO run_hn_posts (run_id, company_id, item_id,
-                   thread_title, posted_at, parse_method, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                   thread_title, posted_at, parse_method, status, company, domain,
+                   ats_kind, ats_token, role, location, work_mode, employment_type, html)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (run_id, company_id, record.item_id, record.thread_title,
-             record.posted_at.isoformat(), record.parse_method, record.status))
+             record.posted_at.isoformat(), record.parse_method, record.status,
+             p.company if p else None, p.domain if p else None,
+             p.ats[0] if p and p.ats else None, p.ats[1] if p and p.ats else None,
+             p.role if p else None, p.location if p else None,
+             p.work_mode if p else None, p.employment_type if p else None,
+             record.html))
         self.conn.commit()
+
+    @staticmethod
+    def _row_to_record(row: sqlite3.Row) -> HNPostRecord:
+        parsed = None
+        if row["domain"]:
+            ats = ((row["ats_kind"], row["ats_token"])
+                   if row["ats_kind"] and row["ats_token"] else None)
+            parsed = ParsedPost(row["company"], row["domain"], ats, row["role"] or "",
+                                row["location"] or "", row["work_mode"] or "unknown",
+                                row["employment_type"] or "unknown")
+        return HNPostRecord(int(row["item_id"]), row["thread_title"],
+                            date.fromisoformat(row["posted_at"]), row["parse_method"],
+                            row["status"], parsed, row["html"] or "")
+
+    def for_run(self, run_id: int) -> list[tuple[int, HNPostRecord]]:
+        """Every HN post this run recorded, as (company_id, record), in order."""
+        rows = self.conn.execute(
+            "SELECT * FROM run_hn_posts WHERE run_id = ? ORDER BY id", (run_id,)).fetchall()
+        return [(int(r["company_id"]), self._row_to_record(r)) for r in rows]
 
     def for_company(self, run_id: int, company_id: int) -> HNPostRecord | None:
         row = self.conn.execute(
             "SELECT * FROM run_hn_posts WHERE run_id = ? AND company_id = ? "
             "ORDER BY id LIMIT 1", (run_id, company_id)).fetchone()
-        if row is None:
-            return None
-        return HNPostRecord(int(row["item_id"]), row["thread_title"],
-                            date.fromisoformat(row["posted_at"]), row["parse_method"],
-                            row["status"])
+        return self._row_to_record(row) if row is not None else None

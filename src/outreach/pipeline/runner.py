@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Sequence
 
 from outreach.contacts.quota import CreditBudget
@@ -21,15 +21,17 @@ from outreach.extraction.htmltext import html_to_text
 from outreach.extraction.pubdate import parse_published_date
 from outreach.net.fetcher import FetchOutcome
 from outreach.pipeline.context import RunContext
-from outreach.pipeline.discovery import (HN_ITEM_URL, HNCandidate, candidate_posting,
-                                         hn_board_source, select_hn_candidates)
+from outreach.pipeline.discovery import (HN_ITEM_URL, HNCandidate, HNSelection,
+                                         candidate_posting, hn_board_source,
+                                         select_hn_candidates)
 from outreach.sources.base import SurfaceTarget
 from outreach.sources.surfaces.blog import find_blog_links
 from outreach.sources.surfaces.github import find_github_org, parse_repos
 from outreach.sources.surfaces.standard import surface_targets
 from outreach.types import (ALL_WORK_MODES, Company, CompanyFacts, EvidenceItem,
-                            FetchAttempt, Finding, HNPostRecord, PersonRef, PostingRef,
-                            SourceClass, SourceDocument, Stage, WorkMode)
+                            FetchAttempt, Finding, HNPost, HNPostRecord, HNThread,
+                            PersonRef, PostingRef, SourceClass, SourceDocument, Stage,
+                            StageResult, WorkMode)
 
 # The stage names this runner actually checkpoints, in the order it writes
 # them. There is no separate "profile" checkpoint: profiling a company is
@@ -411,14 +413,18 @@ def _discover_hn(ctx: RunContext, run_id: int, terms: Sequence[str],
     domain (kept, or already known from config tokens), the skipped ones with
     their status, and the thread title.
     """
-    known: set[str] = set()
-    for p in postings:
-        try:
-            known.add(canonical_domain(p.company_domain))
-        except ValueError:
-            continue
-    selection = select_hn_candidates(ctx, run_id, terms, work_modes, frozenset(known),
-                                     summary)
+    restored = _restored_hn_selection(ctx, run_id, summary)
+    if restored is not None:
+        selection = restored
+    else:
+        known: set[str] = set()
+        for p in postings:
+            try:
+                known.add(canonical_domain(p.company_domain))
+            except ValueError:
+                continue
+        selection = select_hn_candidates(ctx, run_id, terms, work_modes,
+                                         frozenset(known), summary)
     if selection.thread is None:
         return postings, {}, [], ""
 
@@ -452,6 +458,35 @@ def _discover_hn(ctx: RunContext, run_id: int, terms: Sequence[str],
     return [*postings, *hn_postings], researched, skipped, selection.thread.title
 
 
+def _restored_hn_selection(ctx: RunContext, run_id: int,
+                           summary: RunSummary) -> HNSelection | None:
+    """This run's earlier HN selection, if it made one, rebuilt from storage.
+
+    A resume must not re-select: the thread grows during the month and the
+    LLM fallback is not deterministic, so a fresh selection could push a
+    company that was already kept -- and already paid for -- out of the cap,
+    and would pay the fallback again. Nothing here calls HN or the LLM.
+    """
+    if ctx.hn_posts is None:
+        return None
+    rows = [(cid, r) for cid, r in ctx.hn_posts.for_run(run_id) if r.parsed is not None]
+    if not rows:
+        return None
+    selection = HNSelection(thread=HNThread(0, rows[0][1].thread_title, ()))
+    for _cid, r in rows:
+        post = HNPost(r.item_id, datetime.combine(r.posted_at, datetime.min.time(), timezone.utc),
+                      r.html)
+        candidate = HNCandidate(post, r.parsed, r.parse_method,
+                                StageResult(Stage.UNKNOWN, ()), None)
+        {"kept": selection.kept, "skipped_cap": selection.skipped_cap,
+         "skipped_recent": selection.skipped_recent}[r.status].append(candidate)
+    summary.hn_thread_title = selection.thread.title
+    summary.hn_kept = len(selection.kept)
+    summary.hn_skipped_cap = len(selection.skipped_cap)
+    summary.hn_skipped_recent = len(selection.skipped_recent)
+    return selection
+
+
 def _record_hn(ctx: RunContext, run_id: int, researched: dict[str, HNCandidate],
                skipped: Sequence[tuple[str, HNCandidate]], title: str,
                summary: RunSummary) -> dict[int, HNCandidate]:
@@ -466,7 +501,8 @@ def _record_hn(ctx: RunContext, run_id: int, researched: dict[str, HNCandidate],
 
     def record(cid: int, c: HNCandidate, status: str) -> None:
         ctx.hn_posts.insert(run_id, cid, HNPostRecord(
-            c.post.item_id, title, c.post.posted_at.date(), c.method, status))
+            c.post.item_id, title, c.post.posted_at.date(), c.method, status,
+            c.parsed, c.post.html))
 
     for domain, candidate in researched.items():
         try:
