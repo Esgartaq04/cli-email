@@ -47,6 +47,12 @@ def ref(**kw) -> PostingRef:
     ("Denver, CO", "Engineer", "We are remote-first.", "remote"),
     ("Denver, CO", "Engineer", "This is a hybrid role.", "hybrid"),
     ("Denver, CO", "Engineer", "Expect to be in office 5 days a week.", "onsite"),
+    # Hybrid means some days in the office, not all of them: five is onsite.
+    ("Denver, CO", "Engineer", "We work 5 days a week in the office.", "onsite"),
+    ("Denver, CO", "Engineer", "You'll be 5 days per week in our office.", "onsite"),
+    ("Denver, CO", "Engineer", "We work 1 day a week in the office.", "hybrid"),
+    ("Denver, CO", "Engineer", "We work 4 days per week in our office.", "hybrid"),
+    ("Denver, CO", "Engineer", "Up to 15 days a week in the office.", "unknown"),
     # Hybrid beats remote beats onsite, in content as in location.
     ("Denver, CO", "Engineer", "Fully remote, or hybrid if you prefer.", "hybrid"),
     # Location/title conclusive => content is not consulted.
@@ -84,6 +90,24 @@ def test_classify_work_mode(location, title, content, expected):
     ("Contracts Manager", "", None, "unknown"),
     # Non-full-time in the title beats a boilerplate 'full-time' in content.
     ("Engineering Intern", "Full-time hours during the summer.", None, "other"),
+    # "Contract" / "Temp" only as a qualifier on the role, never as part of
+    # what the role works on.
+    ("Smart Contract Engineer", "", None, "unknown"),
+    ("Contract Lifecycle Engineer", "", None, "unknown"),
+    ("Senior Engineer - Smart Contract", "", None, "unknown"),
+    ("Template Engineer", "", None, "unknown"),
+    ("Temperature Controls Engineer", "", None, "unknown"),
+    ("Backend Engineer (Contract)", "", None, "other"),
+    ("Backend Engineer (Contractor)", "", None, "other"),
+    ("Data Engineer - Contract", "", None, "other"),
+    ("Data Engineer - Contract - Remote", "", None, "other"),
+    ("Engineer, Contractor", "", None, "other"),
+    ("Backend Engineer Contract", "", None, "other"),
+    ("Engineer (Contract-to-hire)", "", None, "other"),
+    ("Contract to Hire Backend Engineer", "", None, "other"),
+    ("Temporary Data Analyst", "", None, "other"),
+    ("Data Analyst (Temp)", "", None, "other"),
+    ("Data Analyst - Temp", "", None, "other"),
     # 'contract' in content is noise (customer contracts, etc.).
     ("Engineer", "We build contract-management software.", None, "unknown"),
 ])

@@ -50,10 +50,14 @@ _LT_REMOTE = _rx(
 _LT_ONSITE = _rx(r"\bon-?site\b|\bin[- ]office\b")
 
 # Content: a long free-text body where bare "remote" is noise ("remote monitoring
-# product"), so only explicit statements count.
-_C_HYBRID = _rx(r"\bhybrid\b|\b\d+ days (?:a|per) week in (?:the|our) office\b")
+# product"), so only explicit statements count. Hybrid is some days in the
+# office, not all of them: one to four days a week is hybrid, five is onsite.
+_C_HYBRID = _rx(r"\bhybrid\b|\b[1-4] days? (?:a|per) week in (?:the|our) office\b")
 _C_REMOTE = _rx(r"\bfully remote\b|\b100% remote\b|\bremote-first\b")
-_C_ONSITE = _rx(r"\bon-?site\b|\bin-office\b|\bin office 5 days\b")
+_C_ONSITE = _rx(
+    r"\bon-?site\b|\bin-office\b|\bin office 5 days\b"
+    r"|\b5 days (?:a|per) week in (?:the|our) office\b"
+)
 
 
 def _first_match(text: str, patterns: tuple[tuple[re.Pattern[str], WorkMode], ...]) -> WorkMode:
@@ -93,7 +97,21 @@ _DECLARED_OTHER = frozenset(
 # Only the title is searched for non-full-time hints: "contract" in a body is
 # usually about customers, not the role. Word boundaries keep "Internal Tools"
 # and "Contracts Manager" out.
-_TITLE_OTHER = _rx(r"\b(?:intern(?:ship)?|contract(?:or)?|part[- ]time|temp(?:orary)?)\b")
+#
+# "Contract" and "Temp" count only as a qualifier on the role -- in
+# parentheses, after a dash, or as the title's last word -- never as part of
+# what the role works on: "Smart Contract Engineer" and "Contract Lifecycle
+# Engineer" are full-time jobs, and dropping one hides a real opening.
+# "Smart Contract" is the common title that ends on the word, so the
+# trailing-word rule leaves it out by name.
+_QUALIFIER = r"(?:contract(?:or)?|temp)"
+_TITLE_OTHER = _rx(
+    r"\bintern(?:ship)?\b|\bpart[- ]time\b|\btemporary\b"
+    r"|\bcontract[- ]to[- ]hire\b"
+    rf"|\(\s*{_QUALIFIER}\s*\)"  # "(Contract)", "(Temp)"
+    rf"|[-–—]\s*{_QUALIFIER}\s*(?:$|[-–—|,(/])"  # "- Contract - Remote"
+    rf"|(?<!smart )\b{_QUALIFIER}\s*$"  # "Engineer, Contractor"
+)
 _FULL_TIME = _rx(r"\bfull[- ]time\b")
 
 
