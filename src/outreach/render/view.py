@@ -6,7 +6,7 @@ lays out a run that just finished and one `report` re-renders months later.
 from __future__ import annotations
 
 from collections import Counter
-from datetime import date
+from datetime import date, datetime
 from typing import TYPE_CHECKING
 
 from outreach.config import Config
@@ -144,27 +144,27 @@ def _repo_label(ctx: RunContext, doc: SourceDocument) -> str:
 def _hooks(ctx: RunContext, run_id: int, company_id: int) -> list[ReportHook]:
     """Recently pushed repos and public developer docs: things to build against.
 
-    Documents are company-scoped, not run-scoped, so the run's own record of
-    reading the org's repo list says how many repos it took -- the newest
-    pushes, as `parse_repos` chose them. Taking every GitHub document ever
-    stored would list repos an earlier run saw and this one did not.
+    Documents are company-scoped, not run-scoped, so a repo counts as this
+    run's only when it was fetched inside the run's window. Re-reading a
+    stored document refreshes its fetch time and push date (see
+    `DocumentRepo.insert`), so a repo read again now is in the window with
+    its current push, and one an earlier run saw -- since archived, deleted
+    or gone quiet -- is not.
     """
     attempts = ctx.fetch_attempts.for_company(run_id, company_id)
-    hooks: list[ReportHook] = []
+    started, finished = ctx.runs.window(run_id)
+    # An unfinished run (crashed, or still going) has read up to now.
+    finished = finished or datetime.now()
 
-    repos_read = sum(a.document_count for a in attempts
-                     if a.source_class is SourceClass.GITHUB and a.outcome == "ok")
-    if repos_read:
-        latest: dict[str, SourceDocument] = {}
-        for d in ctx.documents.for_company(company_id):
-            if d.source_class is SourceClass.GITHUB and (
-                    d.url not in latest or d.id > latest[d.url].id):
-                latest[d.url] = d
-        newest = sorted(latest.values(),
-                        key=lambda d: (d.published_at or date.min, d.id),
-                        reverse=True)[:repos_read]
-        hooks += [ReportHook("repo", _repo_label(ctx, d), d.url, d.published_at)
-                  for d in newest]
+    latest: dict[str, SourceDocument] = {}
+    for d in ctx.documents.for_company(company_id):
+        if (d.source_class is SourceClass.GITHUB and started <= d.fetched_at <= finished
+                and (d.url not in latest or d.id > latest[d.url].id)):
+            latest[d.url] = d
+    newest = sorted(latest.values(), key=lambda d: (d.published_at or date.min, d.id),
+                    reverse=True)
+    hooks = [ReportHook("repo", _repo_label(ctx, d), d.url, d.published_at)
+             for d in newest]
 
     # Dev docs are recorded and never extracted, so the attempt is the record.
     hooks += [ReportHook("docs", a.url, a.url, None) for a in attempts

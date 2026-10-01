@@ -159,6 +159,21 @@ _env = Environment(
     autoescape=True,
 )
 
+
+def is_http_url(url: str | None) -> bool:
+    """Whether a third-party URL is safe to put in an href.
+
+    Posting URLs come from job-board APIs and repo URLs from GitHub: data,
+    not ours. Autoescaping keeps them from breaking out of the attribute but
+    not from being `javascript:...`, so anything that does not start with a
+    plain web scheme is rendered as text rather than as a link. Checked on
+    the raw string, so leading junk a browser might strip also fails.
+    """
+    return bool(url) and url.lower().startswith(("http://", "https://"))
+
+
+_env.tests["http_url"] = is_http_url
+
 # Surfaces whose `published_at` is stamped with the fetch date -- an honest
 # "true as of today" for a careers/job/about page, not a parsed publication
 # date. Rendered identically to a real date, "21 Sep 2026" under a careers-

@@ -108,6 +108,25 @@ def test_document_insert_dedupes_and_returns_original_id(tmp_path):
     assert len(docs.for_company(cid)) == 2
 
 
+def test_document_reinsert_refreshes_its_dates(tmp_path):
+    """Same url and text read again: a GitHub repo whose description did not
+    change but which was pushed since. The row must carry the new push date
+    and the new fetch time, or the report shows the first-seen date forever
+    and cannot tell the document was read by this run."""
+    conn = connect(tmp_path / "t.db")
+    companies, docs = CompanyRepo(conn), DocumentRepo(conn)
+    cid = companies.upsert("foo.com", "Foo", None, None)
+    first = SourceDocument(None, cid, "https://github.com/foo/repo", SourceClass.GITHUB,
+                           "foo.com", date(2026, 3, 1), datetime(2026, 3, 2), 200, "h")
+    again = SourceDocument(None, cid, first.url, SourceClass.GITHUB, "foo.com",
+                           date(2026, 9, 15), datetime(2026, 9, 21, 10), 200, "h")
+    doc_id = docs.insert(first)
+    assert docs.insert(again) == doc_id
+    [stored] = docs.for_company(cid)
+    assert (stored.published_at, stored.fetched_at) == (date(2026, 9, 15),
+                                                         datetime(2026, 9, 21, 10))
+
+
 def test_facts_round_trip(tmp_path):
     companies, _ = repos(tmp_path)
     cid = companies.upsert("a.example", "A", None, None)

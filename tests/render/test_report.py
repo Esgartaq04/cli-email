@@ -79,6 +79,16 @@ def test_postings_carry_a_work_mode_tag():
     assert 'href="https://ledgerline.example/jobs/1"' in html
 
 
+def test_a_non_web_posting_or_repo_url_is_text_not_a_link():
+    """Posting and repo URLs are third-party data; autoescaping does not
+    stop a `javascript:` href."""
+    c = card(postings=[ReportPosting("Backend Engineer", "javascript:alert(1)", "remote")],
+             hooks=[ReportHook("repo", "evil-repo", "JavaScript:alert(2)", None)])
+    html = _card_html(render_report(view_with(target=[c])), "Ledgerline")
+    assert "Backend Engineer" in html and "evil-repo" in html
+    assert "javascript:" not in html.lower()
+
+
 def test_finding_quotes_link_to_their_sources():
     html = _card_html(render_report(view_with(target=[card()])), "Ledgerline")
     assert "What they&#39;re building" in html or "What they're building" in html

@@ -154,16 +154,26 @@ class DocumentRepo:
         self.conn = conn
 
     def insert(self, doc: SourceDocument) -> int:
+        # The same url with the same text is one document, but reading it
+        # again is news: a GitHub repo whose description is unchanged may
+        # have been pushed since (its date is the push), and the fetch time
+        # is how a report tells which run read it. Keeping the first-seen
+        # dates would pin a repo to its oldest push forever and let an old
+        # run's documents pass for this one's, so a conflict refreshes both.
+        #
         # cur.lastrowid is unreliable here: it is a connection-level value
-        # that is NOT reset when INSERT OR IGNORE finds a conflict and
-        # inserts nothing, so it can report the id of a *different*, more
-        # recently inserted row instead of this document's real id. Always
-        # look the row up by its unique key rather than trusting lastrowid.
+        # that is NOT reset when the conflict path inserts nothing, so it
+        # can report the id of a *different*, more recently inserted row
+        # instead of this document's real id. Always look the row up by its
+        # unique key rather than trusting lastrowid.
         self.conn.execute(
-            """INSERT OR IGNORE INTO source_documents
+            """INSERT INTO source_documents
                (company_id, url, source_class, publisher_domain, published_at,
                 fetched_at, http_status, content_hash)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(url, content_hash) DO UPDATE SET
+                 published_at = excluded.published_at,
+                 fetched_at = excluded.fetched_at""",
             (doc.company_id, doc.url, doc.source_class.value, doc.publisher_domain,
              doc.published_at.isoformat() if doc.published_at else None,
              doc.fetched_at.isoformat(), doc.http_status, doc.content_hash),

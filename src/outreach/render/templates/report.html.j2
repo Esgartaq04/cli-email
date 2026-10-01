@@ -316,7 +316,7 @@
   {% if company.postings %}
   <ul class="postings">
     {% for p in company.postings %}
-    <li><a href="{{ p.url }}">{{ p.title }}</a><span class="work-mode">{{ p.work_mode }}</span></li>
+    <li>{% if p.url is http_url %}<a href="{{ p.url }}">{{ p.title }}</a>{% else %}<span>{{ p.title }}</span>{% endif %}<span class="work-mode">{{ p.work_mode }}</span></li>
     {% endfor %}
   </ul>
   {% endif %}
@@ -355,7 +355,7 @@
       {% for h in company.hooks %}
       <li>
         <span class="badge">{{ h.kind }}</span>
-        <a href="{{ h.url }}">{{ h.label }}</a>
+        {% if h.url is http_url %}<a href="{{ h.url }}">{{ h.label }}</a>{% else %}<span>{{ h.label }}</span>{% endif %}
         {% if h.when %}<span>{% if h.kind == 'repo' %}pushed {% endif %}{{ h.when.strftime('%d %b %Y') }}</span>{% endif %}
       </li>
       {% endfor %}

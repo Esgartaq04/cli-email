@@ -1,13 +1,13 @@
 """Whole pipeline, every adapter faked, asserting a real report is produced."""
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 
 from tests.pipeline.factories import build_context
 from outreach.contacts.fake import FakeContactProvider
 from outreach.pipeline.runner import run_pipeline
 from outreach.render.report import write_report
 from outreach.cli import _summary_from_storage, build_view
-from outreach.types import CompanyFacts, FundingRound
+from outreach.types import CompanyFacts, FundingRound, SourceClass, SourceDocument
 
 SERIES_B = CompanyFacts(120, None, 2019, (FundingRound("series_b", date(2026, 3, 1)),),
                         (), "hunter")
@@ -173,6 +173,31 @@ def test_hooks_list_recent_repos_and_developer_docs(tmp_path):
     html = _html(view, tmp_path)
     assert "Hooks for a build" in html
     assert "pushed 15 Sep 2026" in html
+
+
+def test_repo_hooks_are_only_the_repos_this_run_read_with_their_current_push(tmp_path):
+    """Documents outlive runs. A repo an earlier run stored (since archived,
+    so not read now) must not be a hook, even with a newer push date; and a
+    repo whose unchanged text an earlier run stored must show this run's
+    push date, not the one first seen."""
+    ctx = build_context()
+    good = ctx.companies.upsert("good.example", "Good Co", None, None)
+    long_ago = datetime(2026, 1, 1)
+
+    def stored(url, text, pushed):
+        ctx.documents.insert(SourceDocument(
+            None, good, url, SourceClass.GITHUB, "good.example", pushed, long_ago, 200,
+            ctx.cache.store(text.encode("utf-8"))))
+
+    stored("https://github.com/goodco/archived-tool", "archived-tool: old", date(2026, 9, 20))
+    stored("https://github.com/goodco/recon-worker",
+           "recon-worker: Streaming ledger reconciliation", date(2026, 3, 1))
+
+    summary = run_pipeline(ctx, "Backend Engineer", "fintech")
+    card = next(c for c in build_view(ctx, summary).other_stages
+                if c.domain == "good.example")
+    assert [(h.url, h.when) for h in card.hooks if h.kind == "repo"] == [
+        ("https://github.com/goodco/recon-worker", date(2026, 9, 15))]
 
 
 def test_a_contact_without_a_profile_gets_a_labelled_search_link(tmp_path):

@@ -254,3 +254,13 @@ def test_findings_round_trip_and_clear(tmp_path):
     assert len(findings.for_company(r1, b)) == 1   # sibling company untouched
     assert len(findings.for_company(r2, a)) == 1   # other run untouched
     assert findings.clear_for_company(r1, a) == 0  # idempotent
+
+
+def test_run_window_is_open_until_the_run_finishes(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    runs = RunRepo(conn)
+    rid = runs.create("Backend Engineer", "fintech", "US", (1, 2000),
+                      datetime(2026, 9, 21, 9))
+    assert runs.window(rid) == (datetime(2026, 9, 21, 9), None)
+    runs.finish(rid, datetime(2026, 9, 21, 10))
+    assert runs.window(rid) == (datetime(2026, 9, 21, 9), datetime(2026, 9, 21, 10))

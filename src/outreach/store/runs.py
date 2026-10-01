@@ -39,6 +39,14 @@ class RunRepo:
             "SELECT schema_version FROM runs WHERE id = ?", (run_id,)).fetchone()
         return int(row["schema_version"])
 
+    def window(self, run_id: int) -> tuple[datetime, datetime | None]:
+        """When the run started, and when it finished (None while unfinished)."""
+        row = self.conn.execute(
+            "SELECT started_at, finished_at FROM runs WHERE id = ?", (run_id,)).fetchone()
+        finished = row["finished_at"]
+        return (datetime.fromisoformat(row["started_at"]),
+                datetime.fromisoformat(finished) if finished else None)
+
     def set_company_stage(self, run_id: int, company_id: int, result: StageResult) -> None:
         # Not `set_stage`: that one records the pipeline step in run_companies.
         self.conn.execute(
