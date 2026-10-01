@@ -32,16 +32,36 @@ ATS_HOSTS = {
     "jobs.lever.co": "lever",
 }
 
-# Hosts a post links that are never the hiring company's own site: HN itself,
-# job boards, social and document hosts, and link shorteners (a shortened
-# link says nothing about where it lands, so guessing would research the
-# wrong company).
+# Host families a post links that are never the hiring company's own site.
+# Matched as the host itself or any subdomain of it, so "apply.workable.com"
+# and "job-boards.eu.greenhouse.io" are caught by their family. Each of these
+# answers its homepage, so if one were taken for the company the size check
+# and the contacts guard would both pass -- and Hunter would be paid for the
+# staff of Workable, Dover or TechCrunch under the company's name.
 NON_COMPANY_HOSTS = frozenset({
-    "news.ycombinator.com", "ycombinator.com", "hn.algolia.com",
-    *ATS_HOSTS,
-    "github.com", "linkedin.com", "twitter.com", "x.com", "docs.google.com",
-    "forms.gle", "calendly.com", "notion.so", "notion.site", "wellfound.com",
-    "angel.co", "bit.ly", "lnkd.in", "t.co", "tinyurl.com",
+    # HN and YC
+    "ycombinator.com", "hn.algolia.com", "workatastartup.com",
+    # applicant-tracking systems and job boards / aggregators
+    "greenhouse.io", "lever.co", "ashbyhq.com", "workable.com", "dover.com",
+    "gem.com", "recruitee.com", "breezy.hr", "bamboohr.com", "smartrecruiters.com",
+    "jobvite.com", "teamtailor.com", "rippling.com", "rippling-ats.com",
+    "wellfound.com", "angel.co", "glassdoor.com", "indeed.com", "builtin.com",
+    "otta.com", "welcometothejungle.com", "weworkremotely.com", "remoteok.com",
+    "levels.fyi",
+    # forms, docs, scheduling, video
+    "google.com", "forms.gle", "typeform.com", "airtable.com", "notion.so",
+    "notion.site", "calendly.com", "loom.com", "youtube.com", "youtu.be", "vimeo.com",
+    # social and code hosting
+    "github.com", "linkedin.com", "twitter.com", "x.com", "facebook.com",
+    "instagram.com", "bsky.app", "discord.gg", "discord.com",
+    # press, blogs, databases
+    "techcrunch.com", "crunchbase.com", "medium.com", "substack.com",
+    "producthunt.com", "bloomberg.com", "reuters.com",
+    # webmail
+    "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "yahoo.com",
+    "icloud.com", "proton.me", "protonmail.com",
+    # link shorteners: a shortened link says nothing about where it lands
+    "bit.ly", "lnkd.in", "t.co", "tinyurl.com",
 })
 
 # Suffixes that make "Node.js" look like a domain in free text.
@@ -127,17 +147,25 @@ def ats_from_links(links: Sequence[str]) -> tuple[str, str] | None:
 
 
 def company_domain(links: Sequence[str], first_line: str) -> str | None:
+    """The hiring company's own domain, or None.
+
+    A domain the company writes next to its own name ("Acme (acme.io)",
+    "Modash.io") is the strongest evidence and wins. Otherwise the first link
+    off any non-company host family. Nothing else on the first line counts:
+    "ASP.NET Engineer" names a technology, not a website.
+    """
+    company_segment = _URL.sub(" ", first_line.split("|", 1)[0].lower())
+    for match in _BARE_DOMAIN.finditer(company_segment):
+        if match.group(1) in _CODE_SUFFIXES:
+            continue
+        host = match.group(0)
+        if not _is_non_company(host):
+            return canonical_domain(host)
     for url in links:
         if not url.lower().startswith(("http://", "https://")):
             continue  # mailto:, relative links, item links
         host = _host(url)
         if host and not _is_non_company(host):
-            return canonical_domain(host)
-    for match in _BARE_DOMAIN.finditer(_URL.sub(" ", first_line.lower())):
-        if match.group(1) in _CODE_SUFFIXES:
-            continue
-        host = match.group(0)
-        if not _is_non_company(host):
             return canonical_domain(host)
     return None
 
@@ -213,7 +241,10 @@ def validate_llm_post(candidate: ParsedPost, html: str) -> ParsedPost | None:
     except ValueError:
         return None
     linked = {canonical_domain(h) for h in (_host(u) for u in links) if h}
-    if _is_non_company(domain) or (domain not in linked and domain not in text):
+    # Written in the text counts only as a whole domain, never inside an email
+    # address or as the prefix of a longer one ("acme.co" in "acme.com").
+    written = re.search(rf"(?<![\w.@-]){re.escape(domain)}(?![\w-]|\.[a-z])", text)
+    if _is_non_company(domain) or (domain not in linked and not written):
         return None
     mode = candidate.work_mode
     if mode != "unknown" and not (mode in _MODE_EVIDENCE and _MODE_EVIDENCE[mode].search(text)):

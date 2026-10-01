@@ -115,3 +115,44 @@ def test_hint_signals_find_round_and_headcount():
     hints = hint_signals("We raised a $30M Series B last spring. We're a team of 120 people.", date(2026, 9, 1))
     assert sorted(h.theme for h in hints) == ["funding-round", "headcount-statement"]
     assert all(h.source_class is SourceClass.HN_POST and h.published_at == date(2026, 9, 1) for h in hints)
+
+
+@pytest.mark.parametrize("links", [
+    ["https://apply.workable.com/acme/j/1"],
+    ["https://app.dover.com/jobs/acme"],
+    ["https://www.workatastartup.com/companies/acme"],
+    ["https://job-boards.eu.greenhouse.io/acme/jobs/1"],
+    ["https://techcrunch.com/2026/09/acme-raises"],
+    ["https://docs.google.com/forms/x", "https://www.youtube.com/watch?v=1"],
+    ["mailto:jobs@acme.io"],
+])
+def test_job_board_press_and_mail_hosts_are_never_the_company_domain(links):
+    assert company_domain(links, "Acme | Backend Engineer | NYC") is None
+
+
+def test_the_company_link_after_a_press_link_still_wins():
+    links = ["https://techcrunch.com/2026/09/acme-raises", "https://acme.io/careers"]
+    assert company_domain(links, "Acme | Backend Engineer | NYC") == "acme.io"
+
+
+def test_a_domain_in_the_company_segment_beats_body_links():
+    assert company_domain(["https://other.dev"], "Acme (acme.io) | Backend Engineer") == "acme.io"
+    assert company_domain([], "Modash.io | Senior Product Engineer | Remote") == "modash.io"
+
+
+def test_tech_names_outside_the_company_segment_are_not_domains():
+    assert company_domain([], "Acme | ASP.NET Engineer | NYC") is None
+    assert company_domain([], "Acme | Socket.io Engineer | NYC") is None
+
+
+def test_validator_rejects_a_domain_only_seen_inside_an_email():
+    html = 'Acme is hiring a Backend Engineer, remote. Email bob@gmail.com'
+    p = ParsedPost("Acme", "gmail.com", None, "Backend Engineer", "", "remote", "unknown")
+    assert validate_llm_post(p, html) is None
+
+
+def test_validator_rejects_a_domain_that_is_only_a_prefix_of_one_in_the_text():
+    html = 'Acme is hiring a Backend Engineer, remote. See acme.com'
+    p = ParsedPost("Acme", "acme.co", None, "Backend Engineer", "", "remote", "unknown")
+    assert validate_llm_post(p, html) is None
+    assert validate_llm_post(replace(p, domain="acme.com"), html).domain == "acme.com"
