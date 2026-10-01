@@ -8,7 +8,8 @@ from typing import Literal
 EmailStatus = Literal["verified", "unverified", "not_found"]
 StageStatus = Literal["pending", "ok", "failed", "skipped_quota",
                       "skipped_domain_unconfirmed", "excluded_size",
-                      "excluded_no_matching_posting", "no_findings"]
+                      "excluded_no_matching_posting", "no_findings",
+                      "skipped_cap", "skipped_recent"]
 # "unknown" is kept by the work-mode filter: a posting that does not say is not
 # evidence against the user's preference.
 WorkMode = Literal["remote", "hybrid", "onsite", "unknown"]
@@ -24,6 +25,9 @@ class SourceClass(str, Enum):
     CHANGELOG = "changelog"
     GITHUB = "github"
     STATUS_PAGE = "status_page"  # legacy: no longer produced, kept so old rows still load
+    # The company's own post in HN's "Who is hiring?" thread: first-party in
+    # content, published on news.ycombinator.com, dated by the post itself.
+    HN_POST = "hn_post"
     NEWS = "news"
     PRESS = "press"
     ABOUT = "about"
@@ -170,3 +174,34 @@ class PersonRef:
     profile_url: str | None
     email: str | None
     email_status: EmailStatus
+
+
+@dataclass(frozen=True)
+class HNPost:
+    """One top-level post in an HN "Who is hiring?" thread, as HTML."""
+    item_id: int
+    posted_at: datetime
+    html: str
+
+
+@dataclass(frozen=True)
+class HNThread:
+    item_id: int
+    title: str
+    posts: tuple[HNPost, ...]
+
+
+@dataclass(frozen=True)
+class ParsedPost:
+    """The hiring company and one job, read out of an HN post.
+
+    `ats` is (board kind, token) -- kind is "greenhouse", "ashby" or "lever" --
+    when the post links a public job board, else None.
+    """
+    company: str
+    domain: str
+    ats: tuple[str, str] | None
+    role: str
+    location: str
+    work_mode: WorkMode
+    employment_type: EmploymentType

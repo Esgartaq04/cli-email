@@ -60,6 +60,17 @@ class HunterConfig:
 
 
 @dataclass(frozen=True)
+class HNConfig:
+    # Discovery from HN's monthly "Who is hiring?" thread. The cap and the
+    # recheck window both apply before any paid call, so they bound what a
+    # thread of 300+ posts can cost; the fallback limit bounds LLM calls.
+    enabled: bool = True
+    max_new_companies: int = 15
+    llm_fallback_max: int = 20
+    recheck_days: int = 30
+
+
+@dataclass(frozen=True)
 class PathsConfig:
     db: Path
     cache: Path
@@ -74,6 +85,7 @@ class Config:
     paths: PathsConfig
     stage: StageConfig = StageConfig()
     hunter: HunterConfig = HunterConfig()
+    hn: HNConfig = HNConfig()
 
 
 def load_config(path: Path) -> Config:
@@ -85,6 +97,7 @@ def load_config(path: Path) -> Config:
         # [stage] and [hunter] are optional: an absent section means the dataclass defaults.
         st, h = raw.get("stage", {}), raw.get("hunter", {})
         sd, hd = StageConfig(), HunterConfig()
+        hn, hnd = raw.get("hn", {}), HNConfig()
         return Config(
             gate=GateConfig(
                 min_independent_sources=int(g["min_independent_sources"]),
@@ -126,6 +139,12 @@ def load_config(path: Path) -> Config:
                 finder_cost=int(h.get("finder_cost", hd.finder_cost)),
                 linkedin_lookup=bool(h.get("linkedin_lookup", hd.linkedin_lookup)),
                 facts_ttl_days=int(h.get("facts_ttl_days", hd.facts_ttl_days)),
+            ),
+            hn=HNConfig(
+                enabled=bool(hn.get("enabled", hnd.enabled)),
+                max_new_companies=int(hn.get("max_new_companies", hnd.max_new_companies)),
+                llm_fallback_max=int(hn.get("llm_fallback_max", hnd.llm_fallback_max)),
+                recheck_days=int(hn.get("recheck_days", hnd.recheck_days)),
             ),
         )
     except KeyError as exc:

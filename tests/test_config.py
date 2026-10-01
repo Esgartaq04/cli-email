@@ -85,3 +85,18 @@ def test_new_sections_are_read_when_present(tmp_path):
     assert cfg.stage.seed_max_headcount == 30
     assert cfg.hunter.linkedin_lookup is False and cfg.hunter.finder_cost == 2
     assert cfg.discovery.ashby_tokens == ("acme",) and cfg.discovery.lever_tokens == ("zeta",)
+
+
+def test_hn_section_is_optional_and_defaults(tmp_path):
+    from outreach.config import HNConfig
+    cfg = load_config(write(tmp_path, BASE))
+    assert cfg.hn == HNConfig()
+    assert (cfg.hn.enabled, cfg.hn.max_new_companies, cfg.hn.llm_fallback_max,
+            cfg.hn.recheck_days) == (True, 15, 20, 30)
+
+
+def test_hn_section_is_read(tmp_path):
+    cfg = load_config(write(tmp_path, BASE + "\n[hn]\nenabled = false\nmax_new_companies = 5\n"))
+    assert cfg.hn.enabled is False
+    assert cfg.hn.max_new_companies == 5
+    assert cfg.hn.recheck_days == 30
