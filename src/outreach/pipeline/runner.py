@@ -413,16 +413,16 @@ def _discover_hn(ctx: RunContext, run_id: int, terms: Sequence[str],
     domain (kept, or already known from config tokens), the skipped ones with
     their status, and the thread title.
     """
-    restored = _restored_hn_selection(ctx, run_id, summary)
+    known: set[str] = set()
+    for p in postings:
+        try:
+            known.add(canonical_domain(p.company_domain))
+        except ValueError:
+            continue
+    restored = _restored_hn_selection(ctx, run_id, frozenset(known), summary)
     if restored is not None:
         selection = restored
     else:
-        known: set[str] = set()
-        for p in postings:
-            try:
-                known.add(canonical_domain(p.company_domain))
-            except ValueError:
-                continue
         selection = select_hn_candidates(ctx, run_id, terms, work_modes,
                                          frozenset(known), summary)
     if selection.thread is None:
@@ -458,7 +458,7 @@ def _discover_hn(ctx: RunContext, run_id: int, terms: Sequence[str],
     return [*postings, *hn_postings], researched, skipped, selection.thread.title
 
 
-def _restored_hn_selection(ctx: RunContext, run_id: int,
+def _restored_hn_selection(ctx: RunContext, run_id: int, known: frozenset[str],
                            summary: RunSummary) -> HNSelection | None:
     """This run's earlier HN selection, if it made one, rebuilt from storage.
 
@@ -478,6 +478,11 @@ def _restored_hn_selection(ctx: RunContext, run_id: int,
                       r.html)
         candidate = HNCandidate(post, r.parsed, r.parse_method,
                                 StageResult(Stage.UNKNOWN, ()), None)
+        # Config-token companies were recorded as kept but were never capped
+        # HN companies: they go back where the fresh selection put them.
+        if r.status == "kept" and r.parsed.domain in known:
+            selection.known.append(candidate)
+            continue
         {"kept": selection.kept, "skipped_cap": selection.skipped_cap,
          "skipped_recent": selection.skipped_recent}[r.status].append(candidate)
     summary.hn_thread_title = selection.thread.title

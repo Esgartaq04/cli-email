@@ -156,3 +156,14 @@ def test_resume_keeps_the_original_hn_selection():
     assert ctx.runs.stage_status(first.run_id, company_id(ctx, "quillhealth.io"),
                                  "discover") == "skipped_cap"
     assert any(d.source_class is SourceClass.HN_POST for d in ctx.documents.for_company(zeta))
+
+
+def test_resume_keeps_a_config_company_out_of_the_hn_cap():
+    ctx = _ctx([GOOD_POST], max_new_companies=0)
+    first = run_pipeline(ctx, "Backend Engineer", "fintech")
+    good = company_id(ctx, "good.example")
+    ctx.runs.set_stage(first.run_id, good, "synthesize", "failed")
+    resumed = run_pipeline(ctx, "Backend Engineer", "fintech", resume_run_id=first.run_id)
+    assert resumed.hn_kept == 0
+    assert all(not p.url.startswith("https://news.ycombinator.com")
+               for p in ctx.postings.for_company(first.run_id, good))

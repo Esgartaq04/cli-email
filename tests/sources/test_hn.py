@@ -84,3 +84,23 @@ def test_fake_counts_calls_and_raises():
     with pytest.raises(RuntimeError):
         failing.latest_thread()
     assert failing.calls == 1
+
+
+def test_a_thread_too_young_to_have_posts_falls_back_to_the_previous_month():
+    search = {"hits": [
+        {"objectID": "1", "title": "Ask HN: Who is hiring? (October 2026)",
+         "created_at_i": 200, "num_comments": 12},
+        {"objectID": "49522897", "title": "Ask HN: Who is hiring? (September 2026)",
+         "created_at_i": 100, "num_comments": 395},
+    ]}
+    assert _source(search=search).latest_thread().item_id == 49522897
+
+
+def test_a_thread_with_enough_posts_is_used_even_if_new():
+    search = {"hits": [
+        {"objectID": "49522897", "title": "Ask HN: Who is hiring? (September 2026)",
+         "created_at_i": 200, "num_comments": 150},
+        {"objectID": "2", "title": "Ask HN: Who is hiring? (August 2026)",
+         "created_at_i": 100, "num_comments": 400},
+    ]}
+    assert _source(search=search).latest_thread().item_id == 49522897

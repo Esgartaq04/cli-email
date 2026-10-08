@@ -135,3 +135,29 @@ def test_generic_openings_in_the_first_line_fall_back_to_the_body():
 def test_free_text_posts_still_match_on_the_body():
     _, summary = _select(_ctx(item_ids=[108]))
     assert summary.hn_role_matched == 1
+
+
+def test_a_remote_only_post_is_region_checked_on_its_text():
+    post = (601, 'Tidal | Backend Engineer | REMOTE | Full-time<p>Remote, United States only. '
+                 '<a href="https://tidal.dev">tidal.dev</a>')
+    selection, summary = _select(_ctx(item_ids=[], extra=[post]))
+    assert [c.parsed.domain for c in selection.kept] == ["tidal.dev"]
+    assert summary.hn_filtered == 0
+
+
+def test_an_llm_answer_without_a_location_is_region_checked_on_the_text():
+    post = (602, 'Larkspur is hiring backend engineers, fully remote, United States only. '
+                 '<a href="https://larkspur.ai">larkspur.ai</a>')
+    answer = ParsedPost("Larkspur", "larkspur.ai", None, "backend engineers", "", "remote", "unknown")
+    selection, _ = _select(_ctx(item_ids=[], extra=[post], parsed_posts={"Larkspur": answer}))
+    assert [c.parsed.domain for c in selection.kept] == ["larkspur.ai"]
+
+
+def test_a_second_unparsed_post_for_a_kept_domain_spends_no_llm_call():
+    first = (603, 'Quarry | Backend Engineer | Remote (US) | REMOTE<p><a href="https://quarry.dev">x</a>')
+    second = (604, 'Quarry is also hiring backend engineers. <a href="https://quarry.dev">x</a>')
+    ctx = _ctx(item_ids=[], extra=[first, second],
+               parsed_posts={"Quarry is also": ParsedPost("Quarry", "quarry.dev", None,
+                                                          "backend engineers", "", "remote", "unknown")})
+    _select(ctx)
+    assert ctx.llm.parse_calls == 0

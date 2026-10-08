@@ -19,6 +19,9 @@ _SEARCH_QUERY = "?tags=story,author_whoishiring&hitsPerPage=10"
 # The same account also posts "Who wants to be hired?" and "Freelancer?"
 # threads at the same moment; only this one lists companies.
 THREAD_PREFIX = "Ask HN: Who is hiring?"
+# A new month's thread goes up on the 1st and fills over days; until it has
+# this many comments, last month's full thread is the better list.
+MIN_COMMENTS = 100
 
 
 class HNUnavailable(RuntimeError):
@@ -54,7 +57,11 @@ class HNThreadSource:
                    and str(h.get("title", "")).startswith(THREAD_PREFIX)]
         if not stories:
             return None
-        newest = max(stories, key=lambda h: h.get("created_at_i") or 0)
+        stories.sort(key=lambda h: h.get("created_at_i") or 0, reverse=True)
+        # A hit without a count is trusted as filled.
+        newest = next((h for h in stories
+                       if not isinstance(h.get("num_comments"), int)
+                       or h["num_comments"] >= MIN_COMMENTS), stories[0])
         try:
             item_id = int(newest["objectID"])
         except (KeyError, TypeError, ValueError):

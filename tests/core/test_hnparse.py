@@ -169,3 +169,42 @@ def test_validator_rejects_a_domain_that_is_only_a_prefix_of_one_in_the_text():
 ])
 def test_us_matching_needs_more_than_a_bare_us_word(location, expected):
     assert matches_region(location, "US") is expected
+
+
+@pytest.mark.parametrize("first_line,role,location", [
+    ("Acme | Backend Engineer (Remote) | NYC", "Backend Engineer (Remote)", "NYC"),
+    ("Acme | Remote Backend Engineer | US", "Remote Backend Engineer", "US"),
+    ("Acme | Backend Engineer, NYC | ONSITE", "Backend Engineer, NYC", "Backend Engineer, NYC"),
+    ("Acme | Senior Engineer, Boston | Boston, MA | ONSITE", "Senior Engineer, Boston", "Boston, MA"),
+    ("Acme | Noida, India | ONSITE | Multiple roles", "Multiple roles", "Noida, India"),
+])
+def test_role_segments_naming_a_place_stay_roles(first_line, role, location):
+    p = parse_post(first_line + '<p><a href="https://acme.io">x</a>')
+    assert (p.role, p.location) == (role, location)
+
+
+def test_a_sentence_with_a_round_and_a_headcount_gives_both_hints():
+    hints = hint_signals("We raised a $30M Series B and are a team of 120 people.", date(2026, 9, 1))
+    assert sorted(h.theme for h in hints) == ["funding-round", "headcount-statement"]
+
+
+def test_a_real_tld_in_the_company_segment_is_the_domain():
+    assert company_domain(["https://github.com/val"], "Val.sh | Backend Engineer | Remote (US)") == "val.sh"
+
+
+def test_a_post_is_read_once_however_many_helpers_look_at_it(monkeypatch):
+    import outreach.core.hnparse as hnparse
+    feeds = []
+    original = hnparse._PostReader.feed
+
+    def counting(self, data):
+        feeds.append(data)
+        return original(self, data)
+    monkeypatch.setattr(hnparse._PostReader, "feed", counting)
+    html = 'Readonce | Backend Engineer | Remote (US)<p><a href="https://readonce.io">x</a>'
+    parse_post(html)
+    post_text(html)
+    post_links(html)
+    validate_llm_post(ParsedPost("Readonce", "readonce.io", None, "Backend Engineer",
+                                 "Remote (US)", "remote", "unknown"), html)
+    assert len(feeds) == 1

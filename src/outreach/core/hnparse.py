@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
+from functools import lru_cache
 from datetime import date
 from html.parser import HTMLParser
 from typing import Sequence
@@ -64,8 +65,6 @@ NON_COMPANY_HOSTS = frozenset({
     "bit.ly", "lnkd.in", "t.co", "tinyurl.com",
 })
 
-# Suffixes that make "Node.js" look like a domain in free text.
-_CODE_SUFFIXES = frozenset({"js", "ts", "py", "rb", "rs", "md", "sh", "json", "yaml", "yml"})
 _BARE_DOMAIN = re.compile(r"\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.([a-z]{2,})\b")
 _URL = re.compile(r"https?://\S+", re.I)
 
@@ -76,6 +75,9 @@ _EMPLOYMENT_ONLY = re.compile(
     rf"^\s*{_EMPLOYMENT_WORDS}(?:\s*(?:[/,&+]|\bor\b|\band\b)\s*{_EMPLOYMENT_WORDS})*\s*$", re.I)
 _SALARY = re.compile(r"[$€£]|\d\s*k\b", re.I)
 _PARENTHETICAL = re.compile(r"\s*\([^)]*(?:\.|http)[^)]*\)")
+_ROLE_WORDS = re.compile(
+    r"\b(?:engineers?|developers?|designers?|managers?|scientists?|analysts?|architects?|"
+    r"researchers?|sre|devops|lead|director|head of|roles|positions|openings)\b", re.I)
 _SENTENCE = re.compile(r"(?<=[.!?])\s+|\n+")
 
 _MAX_FIELD = 120
@@ -99,22 +101,25 @@ class _PostReader(HTMLParser):
         self.parts.append(data)
 
 
-def _read(html: str) -> _PostReader:
+@lru_cache(maxsize=1024)
+def _read(html: str) -> tuple[str, tuple[str, ...]]:
+    """(text, links) for one post. Cached: discovery, the parser and the LLM
+    validator all look at the same post, and a thread has hundreds."""
     reader = _PostReader()
     reader.feed(html or "")
     reader.close()
-    return reader
+    lines = "".join(reader.parts).split("\n")
+    return "\n".join(line.strip() for line in lines), tuple(reader.links)
 
 
 def post_text(html: str) -> str:
     """Plain text, one line per paragraph. HN puts the first line before the first <p>."""
-    lines = "".join(_read(html).parts).split("\n")
-    return "\n".join(line.strip() for line in lines)
+    return _read(html)[0]
 
 
 def post_links(html: str) -> list[str]:
     """Every href in document order, entities decoded."""
-    return _read(html).links
+    return list(_read(html)[1])
 
 
 def _host(url: str) -> str | None:
@@ -156,8 +161,6 @@ def company_domain(links: Sequence[str], first_line: str) -> str | None:
     """
     company_segment = _URL.sub(" ", first_line.split("|", 1)[0].lower())
     for match in _BARE_DOMAIN.finditer(company_segment):
-        if match.group(1) in _CODE_SUFFIXES:
-            continue
         host = match.group(0)
         if not _is_non_company(host):
             return canonical_domain(host)
@@ -196,8 +199,14 @@ def parse_post(html: str) -> ParsedPost | None:
             continue
         else:
             rest.append(seg)
-    location = next((s for s in rest if _location_like(s)), "")
-    role = next((s for s in rest if not _location_like(s)), "")
+    # The role is the segment that names a job ("Backend Engineer (Remote)",
+    # "Senior Engineer, Boston" still are), else the first one left; the
+    # location is another location-like segment, else the role segment itself
+    # when it names the place ("Backend Engineer, NYC").
+    role = next((s for s in rest if _ROLE_WORDS.search(s)),
+                next((s for s in rest if not _location_like(s)), rest[0] if rest else ""))
+    location = next((s for s in rest if s is not role and _location_like(s)),
+                    role if role and _location_like(role) else "")
 
     links = post_links(html)
     domain = company_domain(links, first_line)
@@ -264,12 +273,10 @@ def hint_signals(text: str, posted_at: date) -> list[EvidenceItem]:
     for sentence in (s.strip() for s in _SENTENCE.split(text)):
         if not sentence:
             continue
-        if parse_round(sentence) is not None:
-            theme = "funding-round"
-        elif parse_headcount_statement(sentence) is not None:
-            theme = "headcount-statement"
-        else:
-            continue
-        hints.append(EvidenceItem(None, 0, 0, "", sentence, SourceClass.HN_POST,
-                                  HN_PUBLISHER, posted_at, theme))
+        themes = [theme for theme, found in (
+            ("funding-round", parse_round(sentence) is not None),
+            ("headcount-statement", parse_headcount_statement(sentence) is not None)) if found]
+        for theme in themes:
+            hints.append(EvidenceItem(None, 0, 0, "", sentence, SourceClass.HN_POST,
+                                      HN_PUBLISHER, posted_at, theme))
     return hints

@@ -222,3 +222,11 @@ def test_skipped_cap_and_recent_are_listed_as_excluded():
         ReportExcluded("Zeta", "zeta.io", "skipped_recent")], hn_recheck_days=30))
     assert "not this run — over the HN cap" in html
     assert "researched in the last 30 days" in html
+
+
+def test_hn_link_label_names_the_threads_month_not_the_posts():
+    from datetime import date as _date
+    from outreach.render.view import hn_label
+    assert hn_label("Ask HN: Who is hiring? (September 2026)", _date(2026, 10, 2)) == \
+        "via HN Who is hiring? (September 2026)"
+    assert hn_label("odd title", _date(2026, 10, 2)) == "via HN Who is hiring? (October 2026)"

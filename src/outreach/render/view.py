@@ -5,6 +5,7 @@ lays out a run that just finished and one `report` re-renders months later.
 """
 from __future__ import annotations
 
+import re
 from collections import Counter
 from datetime import date, datetime
 from typing import TYPE_CHECKING
@@ -227,8 +228,14 @@ def _hn_link(ctx: RunContext, run_id: int, company_id: int) -> tuple[str, str] |
     record = ctx.hn_posts.for_company(run_id, company_id) if ctx.hn_posts else None
     if record is None:
         return None
-    return (f"via HN Who is hiring? ({record.posted_at:%B %Y})",
+    return (hn_label(record.thread_title, record.posted_at),
             f"https://news.ycombinator.com/item?id={record.item_id}")
+
+
+def hn_label(thread_title: str, posted_at: date) -> str:
+    """Name the thread's month (a post can land after the month rolls over)."""
+    month = re.search(r"\(([^()]+)\)\s*$", thread_title or "")
+    return f"via HN Who is hiring? ({month.group(1) if month else f'{posted_at:%B %Y}'})"
 
 
 def _stage_counts(counts: dict[str, int]) -> str:

@@ -13,8 +13,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from typing import TYPE_CHECKING, Sequence
 
-from outreach.core.hnparse import (hint_signals, parse_post, post_text,
-                                   validate_llm_post)
+from outreach.core.hnparse import (company_domain, hint_signals, parse_post, post_links,
+                                   post_text, validate_llm_post)
 from outreach.core.stage import classify_stage, parse_headcount_statement, stage_sort_key
 from outreach.core.workmode import posting_matches
 from outreach.net.fetcher import Fetcher
@@ -101,6 +101,8 @@ def select_hn_candidates(ctx: RunContext, run_id: int, terms: Sequence[str],
         elif not allow_llm:
             selection.needs_llm += 1
             continue
+        elif company_domain(post_links(post.html), first_line) in seen:
+            continue  # a company already found: the first post stands, for free
         elif llm_budget > 0:
             llm_budget -= 1
             method = "llm"
@@ -118,7 +120,9 @@ def select_hn_candidates(ctx: RunContext, run_id: int, terms: Sequence[str],
 
         posting = PostingRef(parsed.company, parsed.domain, parsed.role, "",
                              parsed.location, parsed.work_mode, parsed.employment_type)
-        if not (matches_region(parsed.location, ctx.config.discovery.region)
+        # A post whose only location signal is a REMOTE tag (or an LLM answer
+        # with no location) says where the job is in its text, if anywhere.
+        if not (matches_region(parsed.location or text, ctx.config.discovery.region)
                 and posting_matches(posting, work_modes)):
             summary.hn_filtered += 1
             continue
