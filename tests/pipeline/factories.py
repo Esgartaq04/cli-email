@@ -8,8 +8,7 @@ from typing import Mapping, Sequence
 
 import httpx
 
-from outreach.config import (Config, DiscoveryConfig, GateConfig, PathsConfig,
-                             RankingConfig)
+from outreach.config import Config, PathsConfig
 from outreach.llm.fake import FakeLLM
 from outreach.net.fetcher import Fetcher
 from outreach.pipeline.context import RunContext
@@ -23,14 +22,7 @@ from outreach.types import PostingRef
 
 TODAY = date(2026, 9, 21)
 
-# `gate` and `ranking` are still required by Config; nothing in the pipeline
-# reads them any more.
-CONFIG = Config(
-    gate=GateConfig(1, True, 180, frozenset()),
-    ranking=RankingConfig(3, ()),
-    discovery=DiscoveryConfig(1, 2000, "US", ()),
-    paths=PathsConfig(Path("db"), Path("cache"), Path("reports")),
-)
+CONFIG = Config(paths=PathsConfig(Path("db"), Path("reports")))
 
 
 def _transport(routes: Mapping[str, str]) -> httpx.MockTransport:

@@ -1,26 +1,12 @@
 import pytest
 
-_TEST_CONFIG = """
-[gate]
-min_independent_sources = 2
-require_first_party = true
-recency_days = 180
-first_party_classes = ["job_posting", "careers_page", "eng_blog"]
-
-[ranking]
-max_contacts_per_company = 3
-exclude_title_patterns = ["recruit"]
-
-[discovery]
-headcount_min = 20
-headcount_max = 1000
-region = "US"
-greenhouse_tokens = []
-
+_TEST_CONFIG = """\
 [paths]
 db = "data/pipeline.db"
-cache = "data/cache"
 reports = "reports"
+
+[discovery]
+greenhouse_tokens = []
 """
 
 

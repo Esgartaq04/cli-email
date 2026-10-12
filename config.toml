@@ -1,44 +1,52 @@
-[gate]
-min_independent_sources = 1
-require_first_party = true
-recency_days = 180
-first_party_classes = ["job_posting", "careers_page", "eng_blog", "changelog", "github", "status_page", "press", "about", "hn_post"]
-
-[ranking]
-max_contacts_per_company = 3
-exclude_title_patterns = ["recruit", "talent", "sourcer"]
-
-[discovery]
-headcount_min = 1
-headcount_max = 2000
-region = "US"
-greenhouse_tokens = ["stripe", "plaid", "brex"]
-ashby_tokens = []
-lever_tokens = []
-max_blog_posts = 5      # engineering posts read per company (each fetch waits out the 2s per-host limit)
-max_job_postings = 2    # matching job postings read per company
-
-# Optional sections; the values shown are the defaults.
-# [stage]
-# seed_max_headcount = 49
-# growth_max_headcount = 499
-# maturity_min_age_years = 12
-# maturity_min_years_since_funding = 6
-# signal_recency_days = 365
-#
-# [hunter]
-# enrichment_cost = 1
-# finder_cost = 1
-# linkedin_lookup = true
-# facts_ttl_days = 90
-
-# [hn]                            # discovery from HN's "Who is hiring?" thread
-# enabled = true
-# max_new_companies = 15          # HN companies researched per run, best stage hints first
-# llm_fallback_max = 20           # LLM parses per run for posts the rules can't parse
-# recheck_days = 30               # skip HN companies researched this recently
+# Each setting is shown at its default, except the paths (required) and the job-board tokens (your own list).
 
 [paths]
-db = "data/pipeline.db"
-cache = "data/cache"
-reports = "reports"
+db = "data/pipeline.db"          # the SQLite file that remembers runs, companies and who has been emailed
+reports = "reports"              # the folder each run's HTML report is written to
+
+[discovery]                      # job boards that `outreach jobs` searches; `outreach companies` ignores them
+greenhouse_tokens = ["stripe", "plaid", "brex"]   # <token> in https://boards.greenhouse.io/<token>
+ashby_tokens = []                # <token> in https://jobs.ashbyhq.com/<token>
+lever_tokens = []                # <token> in https://jobs.lever.co/<token>
+
+[hn]                             # companies from HN's monthly "Who is hiring?" thread, for `outreach jobs`
+enabled = true                   # false skips the thread
+max_new_companies = 15           # HN companies a run considers, in thread order
+llm_fallback_max = 20            # AI calls per run to read posts the rules can't parse
+
+[hunter]                         # what Hunter charges, in credits (steps of 0.1)
+email_cost = 1                   # revealing one email address
+verify_cost = 0.5                # checking one address Hunter hasn't already confirmed
+verified_max_age_days = 90       # a "valid" status older than this is checked again
+
+[run]
+max_companies = 10               # companies a run buys contacts at; the rest are listed as left out
+contacts_per_company = 3         # people per company, 1 to 10 (Hunter's free plan returns at most 10 per search)
+
+[jobs]
+people = "hiring"                # the people list `outreach jobs` uses unless --people names another
+
+[companies]
+people = "sponsors"              # the people list `outreach companies` uses unless --people names another
+
+# People lists: who to look for at each company. In a list,
+# each tier is one Hunter search by job title, most important first; a run stops once it has enough people
+# (put titles that can name one person, like a "Founder & CTO", in the same tier).
+# exclude_titles drops anyone whose title contains one of its words, in any capitalisation.
+# A list defined here replaces the built-in list of the same name; add your own as [people.<name>].
+
+[people.hiring]
+tiers = [
+    ["founder", "co-founder", "cto", "chief technology officer"],
+    ["vp engineering", "vp of engineering", "head of engineering", "director of engineering"],
+    ["engineering manager", "tech lead"],
+]
+exclude_titles = ["recruit", "talent", "sourcer"]
+
+[people.sponsors]
+tiers = [
+    ["partnerships", "sponsorships", "university relations", "university recruiting",
+     "campus recruiting", "developer relations", "community"],
+    ["events", "marketing manager", "head of marketing", "brand"],
+    ["founder", "co-founder", "cto", "engineering manager"],
+]
