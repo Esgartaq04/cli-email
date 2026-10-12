@@ -94,6 +94,18 @@ class PersonRef:
 
 
 @dataclass(frozen=True)
+class Location:
+    """The place a run looks in; the default is the whole US, as every run was before.
+
+    Maps straight onto Hunter's `headquarters_location` filter, and is what a
+    job posting's location is checked against.
+    """
+    country: str = "US"  # ISO 3166 alpha-2
+    state: str | None = None  # US state code; only with country "US"
+    city: str | None = None
+
+
+@dataclass(frozen=True)
 class HNPost:
     """One top-level post in an HN "Who is hiring?" thread, as HTML."""
     item_id: int
