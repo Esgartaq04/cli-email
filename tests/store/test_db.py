@@ -53,10 +53,10 @@ def test_migration_upgrades_a_v1_database_and_keeps_contacted_history(tmp_path):
     new = connect(tmp_path / "old.db")
     assert new.execute("PRAGMA user_version").fetchone()[0] == 3
     assert ContactRepo(new).for_company(1)[0].contacted_at is not None
-    # The pre-existing company reads back with the new fields empty, and the
-    # pre-existing run is tagged as a v1 run.
+    # The pre-existing company still reads back, and the pre-existing run is
+    # tagged as a v1 run.
     company = CompanyRepo(new).get(1)
-    assert (company.funding_rounds, company.tags, company.founded_year) == ((), (), None)
+    assert company.canonical_domain == "a.example"
     assert new.execute("SELECT schema_version FROM runs").fetchone()[0] == 1
 
 

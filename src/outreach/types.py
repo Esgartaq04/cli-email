@@ -19,6 +19,9 @@ EmploymentType = Literal["full_time", "other", "unknown"]
 
 
 class SourceClass(str, Enum):
+    # Only HOMEPAGE is still used: FetchAttempt records the homepage check that
+    # confirms a guessed domain. The other values only describe rows that
+    # earlier versions wrote, which must still load.
     JOB_POSTING = "job_posting"
     CAREERS_PAGE = "careers_page"
     ENG_BLOG = "eng_blog"
@@ -35,37 +38,6 @@ class SourceClass(str, Enum):
     DEV_DOCS = "dev_docs"
 
 
-class Stage(str, Enum):
-    SEED_STARTUP = "seed_startup"
-    GROWTH = "growth"
-    EXPANSION = "expansion"
-    MATURITY = "maturity"
-    UNKNOWN = "unknown"
-
-
-@dataclass(frozen=True)
-class FundingRound:
-    # "pre_seed" | "seed" | "series_a".."series_z" | "ipo" | "acquired"
-    kind: str
-    announced: date | None
-
-
-@dataclass(frozen=True)
-class CompanyFacts:
-    headcount: int | None
-    headcount_band: str | None
-    founded_year: int | None
-    funding_rounds: tuple[FundingRound, ...]
-    tags: tuple[str, ...]
-    source: str
-
-
-@dataclass(frozen=True)
-class StageResult:
-    stage: Stage
-    reasons: tuple[str, ...]
-
-
 @dataclass(frozen=True)
 class Company:
     id: int | None
@@ -73,13 +45,8 @@ class Company:
     name: str
     headcount: int | None
     headcount_source: str | None
-    # Everything below defaults so positional Company(id, domain, name, hc, src) keeps working.
+    # Defaults so positional Company(id, domain, name, hc, src) keeps working.
     headcount_band: str | None = None
-    founded_year: int | None = None
-    funding_rounds: tuple[FundingRound, ...] = ()
-    tags: tuple[str, ...] = ()
-    github_org: str | None = None
-    facts_fetched_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -94,56 +61,6 @@ class Contact:
     provider: str | None
     looked_up_at: datetime | None
     contacted_at: datetime | None
-
-
-@dataclass(frozen=True)
-class SourceDocument:
-    id: int | None
-    company_id: int
-    url: str
-    source_class: SourceClass
-    publisher_domain: str
-    published_at: date | None
-    fetched_at: datetime
-    http_status: int
-    content_hash: str
-
-
-@dataclass(frozen=True)
-class EvidenceItem:
-    id: int | None
-    company_id: int
-    source_document_id: int
-    claim: str
-    quote: str
-    source_class: SourceClass
-    publisher_domain: str
-    published_at: date | None
-    theme: str
-
-
-@dataclass(frozen=True)
-class Bottleneck:
-    id: int | None
-    company_id: int
-    claim: str
-    summary: str
-    passed: bool
-    reason: str
-    evidence_ids: tuple[int, ...]
-
-
-@dataclass(frozen=True)
-class Finding:
-    id: int | None
-    company_id: int
-    theme: str
-    claim: str
-    summary: str
-    corroborated: bool
-    passed: bool
-    reason: str
-    evidence_ids: tuple[int, ...]
 
 
 @dataclass(frozen=True)

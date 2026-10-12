@@ -2,8 +2,8 @@
 from datetime import datetime
 from outreach.store.db import connect
 from outreach.store.dimensions import CompanyRepo
-from outreach.store.runs import FindingRepo, PostingRepo, RunRepo
-from outreach.types import Finding, PostingRef, Stage, StageResult
+from outreach.store.runs import PostingRepo, RunRepo
+from outreach.types import PostingRef
 
 
 def test_stage_checkpoint_round_trips(tmp_path):
@@ -20,9 +20,8 @@ def test_stage_checkpoint_round_trips(tmp_path):
 
 
 def test_companies_for_run_lists_every_company_the_run_touched(tmp_path):
-    """The complete list of companies a run researched, whether or not a
-    company ever earned a bottlenecks row -- the only way a report can
-    surface a company whose research failed entirely."""
+    """The complete list of companies a run considered, whatever became of
+    each -- the only way a report can surface a company that failed."""
     conn = connect(tmp_path / "t.db")
     companies, runs = CompanyRepo(conn), RunRepo(conn)
     a = companies.upsert("a.example", "A", 40, "careers")
@@ -64,60 +63,33 @@ def test_stage_error_is_none_for_a_stage_never_written_or_without_an_error(tmp_p
     assert runs.stage_error(rid, a, "evidence") is None
 
 
-def test_pending_companies_excludes_completed_ones(tmp_path):
-    conn = connect(tmp_path / "t.db")
-    companies, runs = CompanyRepo(conn), RunRepo(conn)
-    a = companies.upsert("a.example", "A", 40, "careers")
-    b = companies.upsert("b.example", "B", 60, "careers")
-    rid = runs.create("Backend Engineer", "fintech", "US", (20, 1000), datetime.now())
-    runs.set_stage(rid, a, "discover", "ok")
-    runs.set_stage(rid, b, "discover", "ok")
-    runs.set_stage(rid, a, "contacts", "ok")
-    assert runs.pending_companies(rid, "contacts") == [b]
-
-
 def test_clear_for_company_is_scoped_to_one_run_and_one_company(tmp_path):
     """Re-running a stage must drop only that company's rows for that run."""
-    from datetime import date
-
-    from outreach.store.dimensions import DocumentRepo
-    from outreach.store.runs import EvidenceRepo, FetchAttemptRepo
-    from outreach.types import EvidenceItem, FetchAttempt, SourceClass, SourceDocument
+    from outreach.store.runs import FetchAttemptRepo
+    from outreach.types import FetchAttempt, SourceClass
 
     conn = connect(tmp_path / "t.db")
     companies, runs = CompanyRepo(conn), RunRepo(conn)
-    evidence, attempts = EvidenceRepo(conn), FetchAttemptRepo(conn)
+    attempts = FetchAttemptRepo(conn)
     a = companies.upsert("a.example", "A", 40, "careers")
     b = companies.upsert("b.example", "B", 60, "careers")
-    doc_id = DocumentRepo(conn).insert(SourceDocument(
-        None, a, "https://a.example/blog", SourceClass.ENG_BLOG, "a.example",
-        date(2026, 9, 1), datetime.now(), 200, "hash"))
     r1 = runs.create("Backend Engineer", "fintech", "US", (20, 1000), datetime.now())
     r2 = runs.create("Backend Engineer", "fintech", "US", (20, 1000), datetime.now())
-
-    def item(company_id):
-        return EvidenceItem(None, company_id, doc_id, "claim", "quote",
-                            SourceClass.ENG_BLOG, "a.example", date(2026, 9, 1), "t")
 
     def attempt(company_id):
         return FetchAttempt(company_id, SourceClass.ENG_BLOG,
                             "https://a.example/blog", "ok", 200, 1)
 
     for run_id, company_id in ((r1, a), (r1, b), (r2, a)):
-        evidence.insert(run_id, item(company_id))
         attempts.insert(run_id, attempt(company_id))
 
-    assert evidence.clear_for_company(r1, a) == 1
     assert attempts.clear_for_company(r1, a) == 1
 
-    assert evidence.for_company(r1, a) == []
     assert attempts.for_company(r1, a) == []
-    assert len(evidence.for_company(r1, b)) == 1   # sibling company untouched
-    assert len(attempts.for_company(r1, b)) == 1
-    assert len(evidence.for_company(r2, a)) == 1   # earlier run untouched
-    assert len(attempts.for_company(r2, a)) == 1
+    assert len(attempts.for_company(r1, b)) == 1   # sibling company untouched
+    assert len(attempts.for_company(r2, a)) == 1   # earlier run untouched
 
-    assert evidence.clear_for_company(r1, a) == 0  # idempotent
+    assert attempts.clear_for_company(r1, a) == 0  # idempotent
 
 
 def test_a_class_filtered_clear_removes_only_the_intended_classes(tmp_path):
@@ -172,32 +144,6 @@ def test_new_runs_are_schema_version_2(tmp_path):
     assert runs.schema_version(rid) == 2
 
 
-def test_stage_round_trips_and_upserts(tmp_path):
-    _, runs, rid, cid = _run_and_company(tmp_path)
-    assert runs.company_stage(rid, cid) is None
-    runs.set_company_stage(rid, cid, StageResult(Stage.GROWTH, ("~120 employees",)))
-    assert runs.company_stage(rid, cid) == StageResult(Stage.GROWTH, ("~120 employees",))
-    runs.set_company_stage(rid, cid, StageResult(Stage.EXPANSION, ("x", "y")))
-    assert runs.company_stage(rid, cid) == StageResult(Stage.EXPANSION, ("x", "y"))
-    # The startup stage is its own table: the pipeline-step rows are untouched.
-    assert runs.companies_for_run(rid) == []
-
-
-def test_stage_reasons_survive_commas_and_empty(tmp_path):
-    _, runs, rid, cid = _run_and_company(tmp_path)
-    runs.set_company_stage(rid, cid, StageResult(Stage.UNKNOWN, ("a, b", "c")))
-    assert runs.company_stage(rid, cid).reasons == ("a, b", "c")
-    runs.set_company_stage(rid, cid, StageResult(Stage.UNKNOWN, ()))
-    assert runs.company_stage(rid, cid) == StageResult(Stage.UNKNOWN, ())
-
-
-def test_stage_is_scoped_per_run(tmp_path):
-    conn, runs, r1, cid = _run_and_company(tmp_path)
-    r2 = runs.create("Backend Engineer", "fintech", "US", (1, 2000), datetime.now())
-    runs.set_company_stage(r1, cid, StageResult(Stage.SEED_STARTUP, ("s",)))
-    assert runs.company_stage(r2, cid) is None
-
-
 def _posting(url="https://a.example/jobs/1"):
     return PostingRef("A", "a.example", "Backend Engineer", url, "Remote, US",
                       "remote", "full_time")
@@ -227,45 +173,6 @@ def test_postings_are_scoped_by_run_and_company(tmp_path):
     assert (only.work_mode, only.employment_type) == ("unknown", "unknown")
 
 
-def _finding(company_id, claim="slow deploys", passed=True, ids=(3, 7)):
-    return Finding(None, company_id, "infra", claim, "summary", True, passed,
-                   "reason", ids)
-
-
-def test_findings_round_trip_and_clear(tmp_path):
-    conn, runs, r1, a = _run_and_company(tmp_path)
-    b = CompanyRepo(conn).upsert("b.example", "B", 50, "careers")
-    r2 = runs.create("Backend Engineer", "fintech", "US", (1, 2000), datetime.now())
-    findings = FindingRepo(conn)
-
-    fid = findings.insert(r1, _finding(a))
-    findings.insert(r1, _finding(a, "flaky tests", passed=False, ids=()))
-    findings.insert(r1, _finding(b))
-    findings.insert(r2, _finding(a))
-
-    first, second = findings.for_company(r1, a)
-    assert first == Finding(fid, a, "infra", "slow deploys", "summary", True, True,
-                            "reason", (3, 7))
-    assert (second.passed, second.evidence_ids) == (False, ())
-    assert [f.company_id for f in findings.for_run(r1)] == [a, a, b]
-
-    assert findings.clear_for_company(r1, a) == 2
-    assert findings.for_company(r1, a) == []
-    assert len(findings.for_company(r1, b)) == 1   # sibling company untouched
-    assert len(findings.for_company(r2, a)) == 1   # other run untouched
-    assert findings.clear_for_company(r1, a) == 0  # idempotent
-
-
-def test_run_window_is_open_until_the_run_finishes(tmp_path):
-    conn = connect(tmp_path / "t.db")
-    runs = RunRepo(conn)
-    rid = runs.create("Backend Engineer", "fintech", "US", (1, 2000),
-                      datetime(2026, 9, 21, 9))
-    assert runs.window(rid) == (datetime(2026, 9, 21, 9), None)
-    runs.finish(rid, datetime(2026, 9, 21, 10))
-    assert runs.window(rid) == (datetime(2026, 9, 21, 9), datetime(2026, 9, 21, 10))
-
-
 def _hn_db(tmp_path):
     conn = connect(tmp_path / "t.db")
     return conn, CompanyRepo(conn), RunRepo(conn)
@@ -286,22 +193,6 @@ def test_hn_post_record_round_trips_and_dedupes(tmp_path):
     assert repo.for_company(run, cid) == record
     assert conn.execute("SELECT COUNT(*) FROM run_hn_posts").fetchone()[0] == 1
     assert repo.for_company(run, 999) is None
-
-
-def test_researched_since_ignores_this_run_and_old_runs(tmp_path):
-    conn, companies, runs = _hn_db(tmp_path)
-    cid = companies.upsert("acme.io", "Acme", None, None)
-    old = runs.create("r", "s", "US", (1, 2000), datetime(2026, 8, 1))
-    runs.set_stage(old, cid, "evidence", "ok")
-    current = runs.create("r", "s", "US", (1, 2000), datetime(2026, 9, 30))
-    runs.set_stage(current, cid, "evidence", "ok")
-    since = datetime(2026, 8, 31)
-    assert runs.researched_since(cid, since, exclude_run_id=current) is False
-    recent = runs.create("r", "s", "US", (1, 2000), datetime(2026, 9, 15))
-    runs.set_stage(recent, cid, "evidence", "failed")
-    assert runs.researched_since(cid, since, exclude_run_id=current) is False
-    runs.set_stage(recent, cid, "evidence", "ok")
-    assert runs.researched_since(cid, since, exclude_run_id=current) is True
 
 
 def test_company_find_canonicalizes(tmp_path):

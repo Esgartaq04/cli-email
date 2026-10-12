@@ -10,20 +10,16 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
-from datetime import date
 from html.parser import HTMLParser
 from typing import Sequence
 from urllib.parse import urlsplit
 
 from outreach.core.dedupe import canonical_domain
-from outreach.core.stage import parse_headcount_statement, parse_round
 from outreach.core.workmode import classify_employment, classify_work_mode
 # Pure regex over location strings -- no I/O -- shared so an HN location is
 # scoped exactly the way a job board's is.
 from outreach.sources.jobboards.region import _NON_US_MARKERS, _contains_marker, matches_region
-from outreach.types import EvidenceItem, ParsedPost, SourceClass
-
-HN_PUBLISHER = "news.ycombinator.com"
+from outreach.types import ParsedPost
 
 ATS_HOSTS = {
     "boards.greenhouse.io": "greenhouse",
@@ -76,7 +72,6 @@ _EMPLOYMENT_ONLY = re.compile(
     rf"^\s*{_EMPLOYMENT_WORDS}(?:\s*(?:[/,&+]|\bor\b|\band\b)\s*{_EMPLOYMENT_WORDS})*\s*$", re.I)
 _SALARY = re.compile(r"[$€£]|\d\s*k\b", re.I)
 _PARENTHETICAL = re.compile(r"\s*\([^)]*(?:\.|http)[^)]*\)")
-_SENTENCE = re.compile(r"(?<=[.!?])\s+|\n+")
 
 _MAX_FIELD = 120
 
@@ -256,20 +251,3 @@ def validate_llm_post(candidate: ParsedPost, html: str) -> ParsedPost | None:
         return None
     return replace(candidate, domain=domain, ats=ats_from_links(links),
                    employment_type=employment)
-
-
-def hint_signals(text: str, posted_at: date) -> list[EvidenceItem]:
-    """Free stage hints from a post, shaped as the evidence the classifier reads."""
-    hints: list[EvidenceItem] = []
-    for sentence in (s.strip() for s in _SENTENCE.split(text)):
-        if not sentence:
-            continue
-        if parse_round(sentence) is not None:
-            theme = "funding-round"
-        elif parse_headcount_statement(sentence) is not None:
-            theme = "headcount-statement"
-        else:
-            continue
-        hints.append(EvidenceItem(None, 0, 0, "", sentence, SourceClass.HN_POST,
-                                  HN_PUBLISHER, posted_at, theme))
-    return hints

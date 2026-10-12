@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import re
-from typing import Sequence
 from urllib.parse import urlparse
 
 import httpx
 
-from outreach.types import EmailStatus, PersonRef
+from outreach.types import EmailStatus
 
 _BASE_URL = "https://api.hunter.io/v2"
 
@@ -14,9 +13,7 @@ _BASE_URL = "https://api.hunter.io/v2"
 # attribute breakout, but not a `javascript:` (or other non-http) scheme --
 # that needs an explicit allowlist, and for LinkedIn the allowlist is the
 # host: a Hunter payload (or a scraped source behind it) pointing a "profile"
-# at some other site must not become a clickable link. Evidence URLs don't
-# need this: they are always built from `canonical_domain`, never taken
-# verbatim from a third-party API response.
+# at some other site must not become a clickable link.
 _SAFE_URL_SCHEMES = ("http://", "https://")
 _UNSAFE_URL_CHARS = re.compile(r"[\\\s\x00-\x1f\x7f]")
 _LINKEDIN_HANDLE = re.compile(r"^[A-Za-z0-9_-]{3,100}$")
@@ -93,16 +90,12 @@ _NOT_FOUND_STATUSES = frozenset({"invalid", "disposable"})
 
 
 class HunterProvider:
-    """`find`, `verify` and `remaining_credits` against Hunter's REST API.
+    """Checks addresses through Hunter's Email Verifier.
 
-    `find` never returns an address as `"verified"` on its own -- domain
-    search only tells you an address exists and Hunter's guess at its
-    confidence, not that it was confirmed deliverable. Every address `find`
-    returns comes back `"unverified"`, so the caller always routes it
-    through `verify` (or an already-confirmed prior result) before it is
-    ever printed as a real email. That is one of three layers enforcing the
-    verified-email rule; this is the layer closest to the data, so it is
-    the one that must never shortcut it.
+    `verify` says `"verified"` only when Hunter itself calls the address
+    deliverable; anything it could not confirm is `"unverified"`. That is one
+    of three layers enforcing the verified-email rule; this is the layer
+    closest to the data, so it is the one that must never shortcut it.
     """
 
     def __init__(self, api_key: str, client: httpx.Client | None = None) -> None:
@@ -112,40 +105,6 @@ class HunterProvider:
     def _get(self, path: str, **params: str) -> dict:
         data = hunter_get(self._client, path, self._api_key, **params)
         return data if data is not None else {}
-
-    def find(self, domain: str, role_keywords: Sequence[str]) -> list[PersonRef]:
-        data = self._get("domain-search", domain=domain)
-        raw = data.get("data", {})
-        emails = raw.get("emails", []) if isinstance(raw, dict) else []
-        people: list[PersonRef] = []
-        for entry in emails:
-            if not isinstance(entry, dict):
-                continue
-            value = entry.get("value")
-            if not value:
-                continue
-            first = entry.get("first_name") or ""
-            last = entry.get("last_name") or ""
-            full_name = f"{first} {last}".strip() or value
-            people.append(PersonRef(
-                full_name=full_name,
-                title=entry.get("position") or "",
-                # Domain search names this field `linkedin`; `linkedin_url` is
-                # what the other endpoints call it, kept as a fallback.
-                profile_url=_safe_linkedin_url(
-                    entry.get("linkedin") or entry.get("linkedin_url")),
-                email=value,
-                # Never "verified" here -- see class docstring.
-                email_status="unverified",
-            ))
-        return people
-
-    def find_profile(self, domain: str, first_name: str, last_name: str) -> str | None:
-        """LinkedIn URL for a named person at `domain`, via Hunter Email Finder."""
-        data = hunter_get(self._client, "email-finder", self._api_key, missing_ok=True,
-                          domain=domain, first_name=first_name, last_name=last_name)
-        raw = data.get("data") if data else None
-        return _safe_linkedin_url(raw.get("linkedin_url")) if isinstance(raw, dict) else None
 
     def verify(self, email: str) -> EmailStatus:
         data = self._get("email-verifier", email=email)
@@ -159,14 +118,3 @@ class HunterProvider:
         # Hunter could not confirm deliverability either way. Defaulting to
         # "unverified" rather than "verified" is the safe direction.
         return "unverified"
-
-    def remaining_credits(self) -> int:
-        data = self._get("account")
-        raw = data.get("data", {})
-        requests = raw.get("requests", {}) if isinstance(raw, dict) else {}
-        searches = requests.get("searches", {}) if isinstance(requests, dict) else {}
-        available = searches.get("available")
-        used = searches.get("used")
-        if isinstance(available, int) and isinstance(used, int):
-            return max(0, available - used)
-        return 0

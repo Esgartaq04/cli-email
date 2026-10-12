@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from html.parser import HTMLParser
 
-# Elements whose content is never prose the LLM should see or quote from.
+# Elements whose content is never prose.
 _SKIP_TEXT_TAGS = frozenset({"script", "style", "noscript", "template"})
 
 # A conservative set of block-level (and line-break) tags. A space is
@@ -48,7 +48,7 @@ class _TextExtractor(HTMLParser):
 
 
 def html_to_text(html: str) -> str:
-    """Strip tags and decode entities, leaving plain prose an LLM can quote.
+    """Strip tags and decode entities, leaving plain prose.
 
     `convert_charrefs=True` makes `HTMLParser` decode entities (`&rsquo;`,
     `&mdash;`, `&amp;`, numeric refs, ...) into their real characters as it
@@ -58,11 +58,8 @@ def html_to_text(html: str) -> str:
     "FooBar"). `<script>`/`<style>` content is dropped entirely -- it is
     never prose.
 
-    This is the ONLY place raw HTML is turned into the text that both the
-    LLM sees and the substring guard checks against. Both sides of the
-    guard must see the same text, or an honest quote is rejected and a
-    fabricated one that happens to survive markup is accepted -- see
-    `extraction/extract.py`.
+    A job board uses this to read a posting's body, so its work mode and
+    employment type are judged from what a person would read, not from markup.
     """
     parser = _TextExtractor()
     parser.feed(html)

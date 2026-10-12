@@ -6,8 +6,8 @@ from typing import Sequence
 
 from outreach.core.dedupe import canonical_domain
 from outreach.core.workmode import classify_employment, classify_work_mode
-from outreach.extraction.htmltext import html_to_text
 from outreach.net.fetcher import Fetcher
+from outreach.sources.jobboards.htmltext import html_to_text
 from outreach.sources.jobboards.region import matches_region
 from outreach.types import PostingRef
 
