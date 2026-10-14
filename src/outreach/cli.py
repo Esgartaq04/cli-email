@@ -18,6 +18,7 @@ from outreach.core.filters import (SIZE_BANDS, FilterError, describe_filters, pa
                                    parse_sectors, parse_sizes, search_sectors)
 from outreach.core.workmode import parse_work_modes
 from outreach.credits import format_credits
+from outreach.llm.anthropic_client import LLMFormatError
 from outreach.net.fetcher import Fetcher, build_user_agent
 from outreach.pipeline.companies import run_companies
 from outreach.pipeline.context import RunContext
@@ -324,12 +325,24 @@ def jobs(
     if dry_run:
         _jobs_dry_run(ctx, role, filters, work_modes, people_list, use_hn=not no_hn)
         return
-    summary = run_jobs(ctx, role, filters, work_modes, people_list, use_hn=not no_hn,
-                       resume_run_id=resume)
+    try:
+        summary = run_jobs(ctx, role, filters, work_modes, people_list, use_hn=not no_hn,
+                           resume_run_id=resume)
+    except _LLM_ERRORS as exc:
+        _role_expansion_failed(exc)
     _print_run(summary, _write_report(ctx, summary.run_id, summary))
     # A resume runs no search, so it has nothing to say about what was found.
     if resume is None and not any(_found_counts(summary)):
         typer.echo(_NO_JOB_MATCHED)
+
+
+# What expanding the role can raise: the request failed or was refused, or the reply isn't titles.
+_LLM_ERRORS = (httpx.HTTPError, LLMFormatError)
+
+
+def _role_expansion_failed(exc: Exception) -> NoReturn:
+    """The first paid call of a job run failed, before any run was recorded."""
+    _fail(f"Expanding the role into job titles failed: {exc}", 1)
 
 
 def _warn_about_the_setup(config: Config, *, searching: bool, use_hn: bool) -> None:
@@ -360,7 +373,10 @@ def _jobs_dry_run(ctx: RunContext, role: str, filters: RunFilters,
     Expanding the role is the one paid call, as in a run. Reading HN's posts needs no
     LLM here: the posts only the fallback could read are counted instead."""
     typer.echo(f"Filters: {describe_filters(filters)}")
-    terms = ctx.llm.expand_titles(role)
+    try:
+        terms = ctx.llm.expand_titles(role)
+    except _LLM_ERRORS as exc:
+        _role_expansion_failed(exc)
     summary = RunSummary(run_id=0)  # there is no run, so no id
     prospects = find_job_prospects(ctx, terms, filters, work_modes, summary,
                                    use_hn=use_hn, dry_run=True)

@@ -13,6 +13,7 @@ from outreach.cli import app, build_context
 from outreach.config import DEFAULT_PEOPLE, ConfigError, load_config
 from outreach.contacts.fake import FakePeopleFinder
 from outreach.contacts.hunter import HunterAPIError
+from outreach.llm.anthropic_client import LLMFormatError
 from outreach.llm.fake import FakeLLM
 from outreach.sources.companies import CompanyQuery, FakeCompanySearch, FoundCompany
 from outreach.sources.hn import FakeHNSource
@@ -814,6 +815,37 @@ def test_a_jobs_dry_run_says_which_source_failed(monkeypatch):
     assert "Warning: hunter: Hunter discover returned HTTP 429" in result.stderr.splitlines()
     assert ("Found: 0 from job boards, 0 from HN, 0 from Hunter's hiring search; "
             "0 left out by your filters.") in result.stdout.splitlines()
+
+
+_LLM_URL = "https://api.anthropic.com/v1/messages"
+_REJECTED = "Client error '401 Unauthorized' for url '" + _LLM_URL + "'"
+
+
+@pytest.mark.parametrize("extra", [["--dry-run"], []])
+@pytest.mark.parametrize("error", [
+    pytest.param(lambda: httpx.HTTPStatusError(
+        _REJECTED, request=httpx.Request("POST", _LLM_URL), response=httpx.Response(401)),
+        id="rejected"),
+    pytest.param(lambda: httpx.ConnectError("All connection attempts failed"), id="unreachable"),
+    pytest.param(lambda: LLMFormatError("model reply did not parse as JSON after one retry: 'x'"),
+                 id="not-json"),
+])
+def test_a_failed_role_expansion_exits_1_without_a_traceback(monkeypatch, extra, error):
+    _fakes(monkeypatch)
+    monkeypatch.setenv("OUTREACH_CONTACT_EMAIL", "me@example.com")  # so stderr has one line only
+    failure = error()
+
+    def expand_titles(self, role_title):
+        raise failure
+    monkeypatch.setattr(FakeLLM, "expand_titles", expand_titles)
+
+    result = runner.invoke(app, ["jobs", "--role", "Backend Engineer", *extra])
+
+    assert result.exception is None or isinstance(result.exception, SystemExit)  # no traceback
+    assert result.exit_code == 1
+    assert result.stderr.strip() == f"Expanding the role into job titles failed: {failure}"
+    assert "Run 1" not in result.stdout and "Dry run" not in result.stdout
+    assert _count("runs") == 0  # the role is expanded before the run is recorded
 
 
 @pytest.mark.parametrize("extra", [["--dry-run"], []])
