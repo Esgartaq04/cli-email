@@ -29,3 +29,5 @@ class RunSummary:
     spent: int = 0
     bought: int = 0
     out_of_credits: int = 0
+    # Companies a company run found, by where they came from ({"hunter": n}).
+    found: dict[str, int] = field(default_factory=dict)
