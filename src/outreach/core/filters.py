@@ -16,7 +16,7 @@ from typing import Sequence
 # Pure regex over location strings -- no I/O -- shared so a posting is checked
 # for a place the way the US-only scope reads it: same word boundaries.
 from outreach.sources.jobboards.region import _contains_marker
-from outreach.types import Location, WorkMode
+from outreach.types import ALL_WORK_MODES, Location, RunFilters, WorkMode
 
 SIZE_BANDS: tuple[str, ...] = (
     "1-10", "11-50", "51-200", "201-500", "501-1000", "1001-5000", "5001-10000", "10001+",
@@ -173,6 +173,20 @@ def location_label(location: Location) -> str:
         return _NAME_BY_STATE.get(location.state, location.state)
     place = _COUNTRY_NAMES.get(location.country, location.country)
     return f"{location.city}, {place}" if location.city else place
+
+
+def describe_filters(filters: RunFilters) -> str:
+    """A run's filters in one line: "Software Development · 51-200 · Texas".
+
+    Work modes end the line only when they narrow the search: asking for all
+    three is asking for no restriction, and says nothing worth printing.
+    """
+    parts = ["; ".join(filters.sectors) or "any sector",
+             ", ".join(filters.sizes) or "any size",
+             location_label(filters.location)]
+    if filters.work_modes and not ALL_WORK_MODES <= set(filters.work_modes):
+        parts.append(", ".join(filters.work_modes))
+    return " · ".join(parts)
 
 
 def hunter_location(location: Location) -> dict[str, str]:

@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ view.heading }} — {{ view.run_date.isoformat() }}</title>
+<style>
+  :root {
+    --bg: #f7f7f5;
+    --surface: #ffffff;
+    --border: #e2e1dc;
+    --border-strong: #cfcdc6;
+    --text: #1c1b19;
+    --muted: #6b6963;
+    --faint: #94918a;
+    --accent: #2f5d50;
+    --accent-soft: #e6efeb;
+    --warn: #8a5a20;
+    --warn-soft: #f6ecdd;
+    --bad: #8c3434;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17181a;
+      --surface: #1f2123;
+      --border: #32353a;
+      --border-strong: #44484e;
+      --text: #ececea;
+      --muted: #a2a49f;
+      --faint: #7b7e7a;
+      --accent: #7fc2ac;
+      --accent-soft: #23322d;
+      --warn: #d9ab6c;
+      --warn-soft: #322a1d;
+      --bad: #e08a80;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #17181a; --surface: #1f2123; --border: #32353a; --border-strong: #44484e;
+    --text: #ececea; --muted: #a2a49f; --faint: #7b7e7a; --accent: #7fc2ac;
+    --accent-soft: #23322d; --warn: #d9ab6c; --warn-soft: #322a1d; --bad: #e08a80;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 15px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 0 16px 64px; }
+
+  header.run { padding: 32px 0 20px; border-bottom: 1px solid var(--border); }
+  h1 { font-size: 21px; margin: 0 0 6px; letter-spacing: -.01em; }
+  .run-meta { color: var(--muted); font-size: 13.5px; }
+  .run-meta span + span::before { content: "·"; margin: 0 8px; color: var(--faint); }
+
+  h2.section {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .09em;
+    color: var(--faint); font-weight: 600;
+    margin: 40px 0 14px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+  }
+  h2.section .count { margin-left: 6px; color: var(--muted); }
+  .empty { color: var(--faint); font-size: 13.5px; }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 20px; margin-bottom: 16px;
+  }
+  .card-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+  .co-name { font-size: 17px; font-weight: 650; letter-spacing: -.01em; }
+  .co-domain { font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+  .co-facts { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .co-facts > span + span::before { content: "·"; margin: 0 8px; color: var(--faint); }
+
+  .postings { list-style: none; margin: 12px 0 0; padding: 0; font-size: 13.5px; }
+  .postings li { padding: 2px 0; }
+  .postings a { color: var(--text); }
+  .postings .via, .postings .no-link { color: var(--muted); }
+  .work-mode, .via {
+    font-size: 12px; margin-left: 8px; color: var(--muted);
+  }
+  .work-mode {
+    font-family: var(--mono); font-size: 11px; padding: 1px 6px;
+    border-radius: 4px; border: 1px solid var(--border-strong);
+  }
+
+  .people { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 8px; }
+  .person { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 9px 0; border-bottom: 1px dashed var(--border); }
+  .person:last-child { border-bottom: 0; }
+  .p-main { flex: 1 1 260px; }
+  .p-name { font-weight: 600; }
+  .p-title { color: var(--muted); font-size: 13.5px; }
+  .p-links { flex: 0 1 auto; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+  .p-mail { font-family: var(--mono); font-size: 12.5px; }
+  .p-mail.ok a { color: var(--accent); }
+  .p-mail.none { color: var(--faint); }
+  .p-li { font-size: 12.5px; color: var(--accent); }
+  .p-li.search { color: var(--muted); }
+  .flag { font-size: 11px; font-weight: 600; color: var(--warn); background: var(--warn-soft); padding: 2px 6px; border-radius: 4px; }
+  button.copy {
+    font: inherit; font-size: 11.5px; margin-left: 6px; padding: 1px 8px; cursor: pointer;
+    color: var(--muted); background: transparent;
+    border: 1px solid var(--border-strong); border-radius: 4px;
+  }
+  button.copy:hover { color: var(--text); }
+
+  .listed { list-style: none; margin: 0; padding: 0; font-size: 13.5px; }
+  .listed li { padding: 6px 0; border-bottom: 1px dashed var(--border); color: var(--muted); }
+  .listed .ex-name { color: var(--text); font-weight: 600; margin-right: 8px; }
+
+  #run-details { margin-top: 44px; font-size: 13px; color: var(--muted); }
+  .diag-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px 20px; }
+  .diag-item .k { font-size: 11.5px; color: var(--faint); text-transform: uppercase; letter-spacing: .05em; }
+  .diag-item .v { font-family: var(--mono); font-size: 14px; color: var(--text); }
+  #run-details h3 { font-size: 11.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--faint); margin: 20px 0 8px; font-weight: 600; }
+  .diag-err { font-family: var(--mono); font-size: 12.5px; color: var(--bad); }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+<header class="run">
+  <h1>{{ view.heading }}</h1>
+  <div class="run-meta">
+    <span>{{ view.filters_line }}</span>
+    <span>{{ view.people }} people list</span>
+    <span>run {{ view.run_id }}</span>
+    <span>{{ view.run_date.strftime('%d %b %Y') }}</span>
+    <span>{{ view.credits_line }}</span>
+  </div>
+</header>
+
+{% macro card(c) %}
+<article class="card">
+  <div class="card-head">
+    <span class="co-name">{{ c.name }}</span>
+    <span class="co-domain">{{ c.domain }}</span>
+  </div>
+  <div class="co-facts">
+    {% if c.sector %}<span>{{ c.sector }}</span>{% elif c.fit_unknown %}<span>sector unknown</span>{% endif %}
+    {% if c.size %}<span>{{ c.size }} employees</span>{% endif %}
+    {% if c.hq %}<span>HQ {{ c.hq }}</span>{% endif %}
+  </div>
+  {% if c.postings or c.hiring_per_hunter %}
+  <ul class="postings">
+    {% for p in c.postings %}
+    <li>{% if p.url is http_url %}<a href="{{ p.url }}">{{ p.title }}</a>{% else %}<span>{{ p.title }}</span>{% endif %}<span class="work-mode">{{ p.work_mode }}</span><span class="via">{{ p.via }}</span></li>
+    {% endfor %}
+    {% if c.hiring_per_hunter %}
+    <li class="no-link">Hiring {{ c.hiring_per_hunter }}, per Hunter · no posting link</li>
+    {% endif %}
+  </ul>
+  {% endif %}
+  <div class="people">
+    {% for p in c.people %}
+    <div class="person">
+      <div class="p-main">
+        <div class="p-name">{{ p.full_name }}</div>
+        <div class="p-title">{{ p.title }}</div>
+      </div>
+      <div class="p-links">
+        {% if p.email %}
+        <div class="p-mail ok"><a href="mailto:{{ p.email }}">{{ p.email }}</a> <button class="copy" data-copy="{{ p.email }}">Copy</button></div>
+        {% else %}
+        <div class="p-mail none">address not confirmed</div>
+        {% endif %}
+        {# A found profile is linked as itself; without one, a search is offered
+           and labelled as a search, never as the person's profile. #}
+        {% if p.profile_url is http_url %}
+        <a class="p-li" href="{{ p.profile_url }}">LinkedIn</a>
+        {% elif p.linkedin_search is http_url %}
+        <a class="p-li search" href="{{ p.linkedin_search }}">Search LinkedIn</a>
+        {% endif %}
+        {% if p.emailed_on %}<span class="flag">emailed {{ p.emailed_on.strftime('%d %b') }}</span>{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</article>
+{% endmacro %}
+
+{% macro listing(entries) %}
+{% if entries %}
+<ul class="listed">
+  {% for e in entries %}
+  <li><span class="ex-name">{{ e.name }}</span><span class="co-domain">{{ e.domain }}</span> — {{ e.reason }}</li>
+  {% endfor %}
+</ul>
+{% else %}<p class="empty">None.</p>
+{% endif %}
+{% endmacro %}
+
+<section id="with-contacts">
+<h2 class="section">With contacts<span class="count">{{ view.with_contacts|length }}</span></h2>
+{% for c in view.with_contacts %}{{ card(c) }}
+{% else %}<p class="empty">None.</p>
+{% endfor %}
+</section>
+
+<section id="no-one-found">
+<h2 class="section">No one found<span class="count">{{ view.no_one_found|length }}</span></h2>
+{{ listing(view.no_one_found) }}
+</section>
+
+<section id="earlier">
+<h2 class="section">Already on an earlier list<span class="count">{{ view.earlier|length }}</span></h2>
+{{ listing(view.earlier) }}
+</section>
+
+<section id="left-out">
+<h2 class="section">Left out<span class="count">{{ view.left_out|length }}</span></h2>
+{{ listing(view.left_out) }}
+</section>
+
+<section id="run-details">
+  <h2 class="section">Run details</h2>
+  <div class="diag-grid">
+    {% for key, value in view.details.items() %}
+    <div class="diag-item"><div class="k">{{ key }}</div><div class="v">{{ value }}</div></div>
+    {% endfor %}
+  </div>
+  <h3>Errors</h3>
+  {% if view.errors %}
+  <div class="diag-err">
+    {% for e in view.errors %}<div>{{ e }}</div>{% endfor %}
+  </div>
+  {% else %}<p class="empty">None.</p>
+  {% endif %}
+</section>
+
+</div>
+
+<script>
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest("button.copy");
+    if (!button || !navigator.clipboard) return;
+    navigator.clipboard.writeText(button.dataset.copy).then(function () {
+      var label = button.textContent;
+      button.textContent = "Copied";
+      setTimeout(function () { button.textContent = label; }, 1500);
+    });
+  });
+</script>
+</body>
+</html>
