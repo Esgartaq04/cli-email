@@ -6,10 +6,15 @@ from enum import Enum
 from typing import Literal
 
 EmailStatus = Literal["verified", "unverified", "not_found"]
-StageStatus = Literal["pending", "ok", "failed", "skipped_quota",
-                      "skipped_domain_unconfirmed", "excluded_size",
-                      "excluded_no_matching_posting", "no_findings",
-                      "skipped_cap", "skipped_recent"]
+# What a run records for a company at each stage (`RunRepo.set_stage`):
+#   discover -> ok | excluded_no_matching_posting | left_out_filters | skipped_cap
+#   contacts -> bought | empty | no_matching_people | skipped_earlier_list | skipped_emailed |
+#               domain_unconfirmed | over_cap | out_of_credits | failed
+# Rows recorded by earlier versions carry other values; nothing writes them now.
+StageStatus = Literal["ok", "excluded_no_matching_posting", "left_out_filters", "skipped_cap",
+                      "bought", "empty", "no_matching_people", "skipped_earlier_list",
+                      "skipped_emailed", "domain_unconfirmed", "over_cap", "out_of_credits",
+                      "failed"]
 # "unknown" is kept by the work-mode filter: a posting that does not say is not
 # evidence against the user's preference.
 WorkMode = Literal["remote", "hybrid", "onsite", "unknown"]
@@ -209,7 +214,7 @@ class HNPostRecord:
     thread_title: str
     posted_at: date
     parse_method: str  # "parsed" | "llm"
-    status: str  # "kept" | "skipped_cap" | "skipped_recent"
+    status: str  # "kept" | "skipped_cap" (rows from earlier versions may say "skipped_recent")
     # What the post was read as, and the post itself: a resume rebuilds this
     # run's HN selection from these instead of re-reading a thread that has
     # grown since, or paying the LLM fallback again.

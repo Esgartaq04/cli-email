@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import json
 import tempfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Mapping, Sequence
 
 import httpx
 
 from outreach.config import Config, PathsConfig
+from outreach.contacts.base import PeopleFinder
+from outreach.contacts.fake import FakePeopleFinder
 from outreach.llm.fake import FakeLLM
 from outreach.net.fetcher import Fetcher
 from outreach.pipeline.context import RunContext
+from outreach.sources.companies import CompanySearch, FakeCompanySearch
 from outreach.sources.hn import FakeHNSource
 from outreach.sources.jobboards.fake import FakeJobBoardSource
 from outreach.store.db import connect
@@ -19,7 +22,7 @@ from outreach.store.dimensions import CompanyRepo, ContactRepo
 from outreach.store.emailed import EmailedRepo
 from outreach.store.runs import (CompanyInfoRepo, FetchAttemptRepo, HNPostRepo, PostingRepo,
                                  RunContactRepo, RunRepo)
-from outreach.types import PostingRef, RunFilters
+from outreach.types import FoundPerson, PostingRef, RunFilters
 
 TODAY = date(2026, 9, 21)
 
@@ -39,13 +42,17 @@ def _transport(routes: Mapping[str, str]) -> httpx.MockTransport:
 
 
 def build_context(*, postings: Sequence[PostingRef] = (),
-                  routes: Mapping[str, str] | None = None) -> RunContext:
+                  routes: Mapping[str, str] | None = None,
+                  people: PeopleFinder | None = None,
+                  company_search: CompanySearch | None = None,
+                  config: Config = CONFIG) -> RunContext:
     """A context over a scratch database and fakes. `postings` is what the job
     board returns; the fetcher answers 200 with the text of the first route whose
-    URL prefix matches, and 404 for anything else, so nothing reaches the network."""
+    URL prefix matches, and 404 for anything else, so nothing reaches the network.
+    `people` and `company_search` replace the empty fakes Hunter is stood in by."""
     conn = connect(Path(tempfile.mkdtemp()) / "t.db")
     return RunContext(
-        config=CONFIG, today=TODAY,
+        config=config, today=TODAY,
         companies=CompanyRepo(conn), contacts=ContactRepo(conn), runs=RunRepo(conn),
         postings=PostingRepo(conn), fetch_attempts=FetchAttemptRepo(conn),
         # No thread by default: pipeline tests see no HN companies.
@@ -56,7 +63,16 @@ def build_context(*, postings: Sequence[PostingRef] = (),
                         sleep=lambda seconds: None),
         llm=FakeLLM(titles=["backend engineer"]),
         job_board=FakeJobBoardSource(list(postings)),
+        people=people if people is not None else FakePeopleFinder(),
+        company_search=company_search if company_search is not None else FakeCompanySearch(),
     )
+
+
+def person(name: str, title: str, domain: str = "a.example", status: str = "valid",
+           checked_on: date = TODAY - timedelta(days=10)) -> FoundPerson:
+    """A person Hunter's Domain Search returned, with the verdict it gave their
+    address (`status`, as of `checked_on`). The address is the first name at `domain`."""
+    return FoundPerson(name, title, f"{name.split()[0].lower()}@{domain}", None, status, checked_on)
 
 
 def start_run(ctx: RunContext, kind: str = "companies", people: str = "hiring",

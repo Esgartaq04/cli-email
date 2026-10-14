@@ -20,3 +20,12 @@ class RunSummary:
     hn_filtered: int = 0
     hn_skipped_cap: int = 0
     hn_kept: int = 0
+    # Hunter credits, in tenths (see outreach.credits). `bought` counts the
+    # companies a person was bought at, including those a resumed run bought
+    # before it stopped; `spent`, `emails` and `verifications` only this call's.
+    balance_before: int | None = None
+    emails: int = 0
+    verifications: int = 0
+    spent: int = 0
+    bought: int = 0
+    out_of_credits: int = 0
