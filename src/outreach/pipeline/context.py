@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from outreach.config import Config
+from outreach.contacts.base import PeopleFinder
 from outreach.llm.base import LLMClient
 from outreach.net.fetcher import Fetcher
 from outreach.sources.base import JobBoardSource
@@ -39,3 +40,4 @@ class RunContext:
     llm: LLMClient | None = None
     job_board: JobBoardSource | None = None
     hn: HNSource | None = None
+    people: PeopleFinder | None = None

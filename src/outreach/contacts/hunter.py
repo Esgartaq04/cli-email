@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import re
+from datetime import date
+from typing import Sequence
 from urllib.parse import urlparse
 
 import httpx
 
-from outreach.types import EmailStatus
+from outreach.credits import tenths
+from outreach.types import EmailStatus, FoundPerson
 
 _BASE_URL = "https://api.hunter.io/v2"
 
@@ -80,6 +83,53 @@ def hunter_get(client: httpx.Client, path: str, api_key: str, *,
     return payload if isinstance(payload, dict) else {}
 
 
+def _checked_on(value: object) -> date | None:
+    """The day of a Hunter verification stamp: "2019-12-06", or a timestamp starting with one."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+
+
+def _found_person(entry: object) -> FoundPerson | None:
+    """One `data.emails[]` entry of a Domain Search; None when it has no address."""
+    if not isinstance(entry, dict):
+        return None
+    email = entry.get("value")
+    if not isinstance(email, str) or not email.strip():
+        return None
+    email = email.strip()
+    name = " ".join(part.strip() for part in (entry.get("first_name"), entry.get("last_name"))
+                    if isinstance(part, str) and part.strip())
+    position = entry.get("position")
+    verification = entry.get("verification")
+    verification = verification if isinstance(verification, dict) else {}
+    status = verification.get("status")
+    return FoundPerson(
+        full_name=name or email,
+        title=position.strip() if isinstance(position, str) else "",
+        email=email,
+        profile_url=_safe_linkedin_url(entry.get("linkedin") or entry.get("linkedin_url")),
+        hunter_status=status if isinstance(status, str) and status else None,
+        hunter_checked_on=_checked_on(verification.get("date")),
+    )
+
+
+def _credit_counter(payload: dict) -> tuple[int, int] | None:
+    """(available, used) in tenths from `data.requests.credits`, or None if unreadable."""
+    node: object = payload
+    for key in ("data", "requests", "credits"):
+        node = node.get(key) if isinstance(node, dict) else None
+    if not isinstance(node, dict):
+        return None
+    try:
+        return tenths(node.get("available")), tenths(node.get("used"))
+    except ValueError:
+        return None
+
+
 # Hunter's own verifier statuses, mapped down to the three this pipeline
 # ever acts on. "valid" is the only status Hunter itself is confident enough
 # in to call deliverable; everything else (accept_all, webmail, unknown,
@@ -90,7 +140,8 @@ _NOT_FOUND_STATUSES = frozenset({"invalid", "disposable"})
 
 
 class HunterProvider:
-    """Checks addresses through Hunter's Email Verifier.
+    """Finds people through Hunter's Domain Search and checks addresses through
+    its Email Verifier.
 
     `verify` says `"verified"` only when Hunter itself calls the address
     deliverable; anything it could not confirm is `"unverified"`. That is one
@@ -105,6 +156,39 @@ class HunterProvider:
     def _get(self, path: str, **params: str) -> dict:
         data = hunter_get(self._client, path, self._api_key, **params)
         return data if data is not None else {}
+
+    def count_people(self, domain: str) -> int:
+        """Personal addresses Hunter holds for the company. Free."""
+        data = self._get("email-count", domain=domain).get("data")
+        count = data.get("personal_emails") if isinstance(data, dict) else None
+        if isinstance(count, int) and not isinstance(count, bool):
+            return max(count, 0)
+        return 0
+
+    def search_people(self, domain: str, titles: Sequence[str], limit: int) -> list[FoundPerson]:
+        """Up to `limit` personal addresses whose job title matches any of `titles`.
+
+        Hunter charges for each address it returns, so this never asks for
+        nothing (no titles would be an unfiltered search) and never keeps more
+        than `limit`.
+        """
+        if limit <= 0 or not titles:
+            return []
+        data = self._get("domain-search", domain=domain, type="personal",
+                         job_titles=",".join(titles), limit=str(limit)).get("data")
+        entries = data.get("emails") if isinstance(data, dict) else None
+        people = [person for person in map(_found_person, entries if isinstance(entries, list) else ())
+                  if person is not None]
+        return people[:limit]
+
+    def balance_tenths(self) -> int:
+        """Credits left, in tenths. A balance that cannot be read is an error, so
+        that a run buys nothing rather than spending blind."""
+        counter = _credit_counter(self._get("account"))
+        if counter is None:
+            raise HunterAPIError("Hunter account response has no credit balance")
+        available, used = counter
+        return max(0, available - used)
 
     def verify(self, email: str) -> EmailStatus:
         data = self._get("email-verifier", email=email)

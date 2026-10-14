@@ -1,0 +1,32 @@
+{
+  "data": {
+    "first_name": "Test",
+    "last_name": "User",
+    "email": "user@example.com",
+    "plan_name": "Growth",
+    "plan_level": 2,
+    "reset_date": "2026-10-22",
+    "team_id": 1,
+    "requests": {
+      "credits": {
+        "used": 550.0,
+        "available": 10000.0,
+        "remaining": 9450.0
+      },
+      "searches": {
+        "used": 500,
+        "available": 10000,
+        "remaining": 9500
+      },
+      "verifications": {
+        "used": 100,
+        "available": 20000,
+        "remaining": 19900
+      }
+    },
+    "calls": {
+      "used": 18526,
+      "available": 20000
+    }
+  }
+}

@@ -93,6 +93,21 @@ class PersonRef:
 
 
 @dataclass(frozen=True)
+class FoundPerson:
+    """One person Hunter's Domain Search returned for a company.
+
+    `hunter_status` and `hunter_checked_on` are Domain Search's own verdict on
+    the address (e.g. "valid"), so a recent one can stand in for a paid check.
+    """
+    full_name: str
+    title: str
+    email: str
+    profile_url: str | None = None
+    hunter_status: str | None = None
+    hunter_checked_on: date | None = None
+
+
+@dataclass(frozen=True)
 class Location:
     """The place a run looks in; the default is the whole US, as every run was before.
 

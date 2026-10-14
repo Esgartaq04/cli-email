@@ -28,9 +28,9 @@ def isolated_from_the_users_setup(monkeypatch, tmp_path):
 def test_real_adapters_build_one_source_per_configured_board(monkeypatch, tmp_path):
     """Construction only -- no request is made, so this touches no network.
     A board with an empty token list is left out rather than built to search
-    nothing. Only the Anthropic key is needed: no Hunter key is set."""
+    nothing. The people finder is Hunter, which needs its key."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
-    monkeypatch.delenv("HUNTER_API_KEY", raising=False)
+    monkeypatch.setenv("HUNTER_API_KEY", "test")
     monkeypatch.delenv("OUTREACH_FAKE_ADAPTERS", raising=False)
     config = tmp_path / "config.toml"
     config.write_text(config.read_text(encoding="utf-8").replace(
@@ -43,3 +43,26 @@ def test_real_adapters_build_one_source_per_configured_board(monkeypatch, tmp_pa
     assert [type(s).__name__ for s in ctx.job_board.sources] == [
         "GreenhouseBoardSource", "LeverBoardSource"]
     assert ctx.job_board.sources[1].tokens == ("l1", "l2")
+    assert type(ctx.people).__name__ == "HunterProvider"
+
+
+def test_real_adapters_need_a_hunter_key(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.delenv("HUNTER_API_KEY", raising=False)
+    monkeypatch.delenv("OUTREACH_FAKE_ADAPTERS", raising=False)
+
+    from outreach.cli import build_context
+    from outreach.config import ConfigError
+    with pytest.raises(ConfigError, match="HUNTER_API_KEY"):
+        build_context()
+
+
+def test_fake_adapters_find_people_without_any_credits(monkeypatch):
+    """A fake run can never buy anyone: the fake finder starts with no balance."""
+    monkeypatch.setenv("OUTREACH_FAKE_ADAPTERS", "1")
+
+    from outreach.cli import build_context
+    ctx = build_context()
+
+    assert type(ctx.people).__name__ == "FakePeopleFinder"
+    assert ctx.people.balance_tenths() == 0
