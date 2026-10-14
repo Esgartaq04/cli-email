@@ -28,16 +28,21 @@ def build_context(config_path: Path = Path("config.toml")) -> RunContext:
     if use_fakes:
         from outreach.contacts.fake import FakePeopleFinder
         from outreach.llm.fake import FakeLLM
+        from outreach.sources.companies import FakeCompanySearch
         from outreach.sources.hn import FakeHNSource
         from outreach.sources.jobboards.fake import FakeJobBoardSource
         llm, job_board, hn = FakeLLM(), FakeJobBoardSource([]), FakeHNSource()
         # No credits, so a fake run can never buy anyone.
         people = FakePeopleFinder(balance=0)
+        company_search = FakeCompanySearch()
     else:
         from outreach.contacts.hunter import HunterProvider
         from outreach.llm.anthropic_client import AnthropicLLM
+        from outreach.sources.companies import HunterCompanySearch
         llm = AnthropicLLM(require_env("ANTHROPIC_API_KEY"))
-        people = HunterProvider(require_env("HUNTER_API_KEY"))
+        hunter_key = require_env("HUNTER_API_KEY")
+        people = HunterProvider(hunter_key)
+        company_search = HunterCompanySearch(hunter_key)
         job_board = hn = None  # set below, both need the fetcher
 
     conn = connect(config.paths.db)
@@ -72,6 +77,7 @@ def build_context(config_path: Path = Path("config.toml")) -> RunContext:
         hn_posts=HNPostRepo(conn), company_info=CompanyInfoRepo(conn),
         run_contacts=RunContactRepo(conn), emailed=EmailedRepo(conn),
         fetcher=fetcher, llm=llm, job_board=job_board, hn=hn, people=people,
+        company_search=company_search,
     )
 
 

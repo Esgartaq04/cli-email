@@ -15,7 +15,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from outreach.contacts.hunter import HunterAPIError, HunterProvider, _safe_linkedin_url
+from outreach.contacts.hunter import HunterAPIError, HunterProvider, _safe_linkedin_url, hunter_post
+from outreach.sources.companies import CompanyQuery, HunterCompanySearch
 from outreach.types import FoundPerson
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
@@ -116,7 +117,11 @@ SECRET = "sk-hunter-SECRET-key"
     lambda c: HunterProvider(SECRET, client=c).count_people("acme.com"),
     lambda c: HunterProvider(SECRET, client=c).search_people("acme.com", ["cto"], 3),
     lambda c: HunterProvider(SECRET, client=c).balance_tenths(),
-], ids=["verify", "count_people", "search_people", "balance_tenths"])
+    lambda c: HunterCompanySearch(SECRET, client=c).search(CompanyQuery(("Banking",))),
+    lambda c: HunterCompanySearch(SECRET, client=c).check(["acme.com"], CompanyQuery(("Banking",))),
+    lambda c: hunter_post(c, "discover", SECRET, {"headcount": ["1-10"]}),
+], ids=["verify", "count_people", "search_people", "balance_tenths", "company_search", "company_check",
+        "hunter_post"])
 def test_http_errors_never_carry_the_api_key(call):
     """The key rides in the query string, and httpx's own HTTPStatusError
     message embeds the full URL. The pipeline persists exception text, so the
@@ -128,6 +133,25 @@ def test_http_errors_never_carry_the_api_key(call):
     assert "api_key" not in str(exc) and "?" not in str(exc)
     assert "HTTP 500" in str(exc)
     assert exc.__cause__ is None and exc.__context__ is None
+
+
+def test_hunter_post_sends_the_body_as_json_and_the_key_only_in_the_query():
+    seen: list[httpx.Request] = []
+    body = {"organization": {"domain": ["acme.example"]}, "headcount": ["1-10"]}
+
+    payload = hunter_post(_client(_serving({"data": []}, seen)), "discover", "key", body)
+
+    assert payload == {"data": []}
+    assert seen[0].method == "POST" and seen[0].url.path == "/v2/discover"
+    assert dict(seen[0].url.params) == {"api_key": "key"}
+    assert json.loads(seen[0].content) == body  # the key is not in the body
+
+
+@pytest.mark.parametrize("raw", [b"[]", b"3", b"null"])
+def test_hunter_post_reads_a_response_that_is_not_an_object_as_empty(raw):
+    client = _client(lambda request: httpx.Response(200, content=raw))
+
+    assert hunter_post(client, "discover", "key", {}) == {}
 
 
 # --- people search -----------------------------------------------------------

@@ -44,6 +44,7 @@ def test_real_adapters_build_one_source_per_configured_board(monkeypatch, tmp_pa
         "GreenhouseBoardSource", "LeverBoardSource"]
     assert ctx.job_board.sources[1].tokens == ("l1", "l2")
     assert type(ctx.people).__name__ == "HunterProvider"
+    assert type(ctx.company_search).__name__ == "HunterCompanySearch"
 
 
 def test_real_adapters_need_a_hunter_key(monkeypatch):
@@ -66,3 +67,4 @@ def test_fake_adapters_find_people_without_any_credits(monkeypatch):
 
     assert type(ctx.people).__name__ == "FakePeopleFinder"
     assert ctx.people.balance_tenths() == 0
+    assert type(ctx.company_search).__name__ == "FakeCompanySearch"

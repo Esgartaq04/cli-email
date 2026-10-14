@@ -74,6 +74,20 @@ def hunter_get(client: httpx.Client, path: str, api_key: str, *,
     response = client.get(f"{_BASE_URL}/{path}", params={**params, "api_key": api_key})
     if missing_ok and response.status_code == 404:
         return None
+    return _json_object(response, path)
+
+
+def hunter_post(client: httpx.Client, path: str, api_key: str, body: dict) -> dict:
+    """POST `body` as JSON to one Hunter endpoint and return its JSON object.
+
+    The key goes in the query string, as for `hunter_get`; the body carries
+    only the request. Any non-2xx raises `HunterAPIError`.
+    """
+    response = client.post(f"{_BASE_URL}/{path}", params={"api_key": api_key}, json=body)
+    return _json_object(response, path)
+
+
+def _json_object(response: httpx.Response, path: str) -> dict:
     # Checked by hand rather than via `raise_for_status()` inside a try: that
     # exception would stay attached as `__context__` even under `from None`,
     # carrying the URL (and so the key) with it.

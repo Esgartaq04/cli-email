@@ -8,6 +8,7 @@ from outreach.contacts.base import PeopleFinder
 from outreach.llm.base import LLMClient
 from outreach.net.fetcher import Fetcher
 from outreach.sources.base import JobBoardSource
+from outreach.sources.companies import CompanySearch
 from outreach.sources.hn import HNSource
 from outreach.store.dimensions import CompanyRepo, ContactRepo
 from outreach.store.emailed import EmailedRepo
@@ -41,3 +42,4 @@ class RunContext:
     job_board: JobBoardSource | None = None
     hn: HNSource | None = None
     people: PeopleFinder | None = None
+    company_search: CompanySearch | None = None

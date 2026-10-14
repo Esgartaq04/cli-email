@@ -1,0 +1,32 @@
+{
+  "data": [
+    {
+      "domain": "hunter.io",
+      "organization": "Hunter",
+      "emails_count": {
+        "personal": 23,
+        "generic": 5,
+        "total": 28
+      }
+    }
+  ],
+  "meta": {
+    "results": 1,
+    "limit": 100,
+    "offset": 0,
+    "params": {
+      "organization": {
+        "domain": [
+          "hunter.io"
+        ]
+      }
+    },
+    "filters": {
+      "organization": {
+        "domain": [
+          "hunter.io"
+        ]
+      }
+    }
+  }
+}
