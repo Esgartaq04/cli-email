@@ -1,7 +1,7 @@
 """Discovery from HN's "Who is hiring?" thread, up to the point money is spent.
 
 Everything here is free except the capped LLM fallback: the thread is read,
-posts are matched against the role, parsed, filtered to the region and work
+posts are matched against the role, parsed, filtered to the location and work
 mode, and capped -- all before a single Hunter credit. The cap takes companies
 in thread order, so it bounds what a run can cost without favouring anyone.
 What survives is handed to the job run.
@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Sequence
 
+from outreach.core.filters import posting_in_location
 from outreach.core.hnparse import parse_post, post_text, validate_llm_post
 from outreach.core.workmode import posting_matches
 from outreach.net.fetcher import Fetcher
@@ -20,7 +21,7 @@ from outreach.sources.jobboards.greenhouse import GreenhouseBoardSource
 from outreach.sources.jobboards.lever import LeverBoardSource
 from outreach.sources.jobboards.multi import MultiBoardSource
 from outreach.sources.jobboards.region import matches_region
-from outreach.types import HNPost, HNThread, ParsedPost, PostingRef, WorkMode
+from outreach.types import HNPost, HNThread, Location, ParsedPost, PostingRef, WorkMode
 
 if TYPE_CHECKING:
     from outreach.pipeline.context import RunContext
@@ -58,7 +59,7 @@ def candidate_posting(candidate: HNCandidate) -> PostingRef:
 def select_hn_candidates(ctx: RunContext, terms: Sequence[str],
                          work_modes: frozenset[WorkMode], known_domains: frozenset[str],
                          summary: RunSummary, *, allow_llm: bool = True,
-                         region: str = "US") -> HNSelection:
+                         location: Location = Location()) -> HNSelection:
     if ctx.hn is None:
         return HNSelection(thread=None)
     thread = ctx.hn.latest_thread()
@@ -91,7 +92,8 @@ def select_hn_candidates(ctx: RunContext, terms: Sequence[str],
         parsed, method = parse_post(post.html), "parsed"
         if parsed is not None:
             summary.hn_parsed += 1
-        elif not allow_llm:
+        elif not allow_llm or ctx.llm is None:
+            # Without an LLM to ask, the post is one the fallback would have to read.
             selection.needs_llm += 1
             continue
         elif llm_budget > 0:
@@ -111,7 +113,8 @@ def select_hn_candidates(ctx: RunContext, terms: Sequence[str],
 
         posting = PostingRef(parsed.company, parsed.domain, parsed.role, "",
                              parsed.location, parsed.work_mode, parsed.employment_type)
-        if not (matches_region(parsed.location, region)
+        if not (matches_region(parsed.location, location.country)
+                and posting_in_location(parsed.location, parsed.work_mode, location)
                 and posting_matches(posting, work_modes)):
             summary.hn_filtered += 1
             continue
@@ -129,6 +132,7 @@ def select_hn_candidates(ctx: RunContext, terms: Sequence[str],
 
     summary.hn_kept = len(selection.kept)
     summary.hn_skipped_cap = len(selection.skipped_cap)
+    summary.hn_needs_llm = selection.needs_llm
     return selection
 
 

@@ -6,16 +6,16 @@ from outreach.llm.fake import FakeLLM
 from outreach.pipeline.discovery import select_hn_candidates
 from outreach.pipeline.summary import RunSummary
 from outreach.sources.hn import FakeHNSource
-from outreach.types import ALL_WORK_MODES, ParsedPost
+from outreach.types import ALL_WORK_MODES, Location, ParsedPost
 from tests.pipeline.factories import build_context, hn_thread
 
 TERMS = ["backend engineer", "platform engineer"]
 
 
-def _select(ctx, known=frozenset(), allow_llm=True):
+def _select(ctx, known=frozenset(), allow_llm=True, location=Location()):
     summary = RunSummary(run_id=0)
     selection = select_hn_candidates(ctx, TERMS, ALL_WORK_MODES, known, summary,
-                                     allow_llm=allow_llm)
+                                     allow_llm=allow_llm, location=location)
     return selection, summary
 
 
@@ -66,6 +66,33 @@ def test_valid_llm_output_is_kept_as_llm_parsed():
 def test_non_us_posts_are_filtered():
     selection, summary = _select(_ctx(item_ids=[107]))
     assert summary.hn_filtered == 1 and selection.kept == []
+
+
+def test_location_filters_hn_posts():
+    austin = (701, 'Tinyco | Backend Engineer | Austin, TX | ONSITE<p>A team of 4. '
+                   '<a href="https://tinyco.dev">tinyco.dev</a>')
+    chicago = (702, 'Bigco | Backend Engineer | Chicago, IL | ONSITE<p>A team of 400. '
+                    '<a href="https://bigco.dev">bigco.dev</a>')
+    ctx = _ctx(item_ids=[], extra=[austin, chicago])
+    selection, summary = _select(ctx, location=Location("US", "TX"))
+    assert _domains(selection.kept) == ["tinyco.dev"]
+    assert summary.hn_filtered == 1
+    # With no location asked for, both US posts stand.
+    everywhere, _ = _select(ctx)
+    assert _domains(everywhere.kept) == ["tinyco.dev", "bigco.dev"]
+
+
+def test_the_dry_mode_count_of_posts_needing_the_llm_is_on_the_summary():
+    selection, summary = _select(_ctx(item_ids=[106, 108]), allow_llm=False)
+    assert selection.needs_llm == summary.hn_needs_llm == 2
+
+
+def test_without_an_llm_a_free_text_post_needs_it_rather_than_being_rejected():
+    ctx = _ctx(item_ids=[108], llm_fallback_max=1)
+    ctx.llm = None
+    selection, summary = _select(ctx)
+    assert (selection.needs_llm, summary.hn_llm_rejected, summary.hn_llm_parsed) == (1, 0, 0)
+    assert selection.kept == []
 
 
 def test_one_company_per_domain_first_post_wins():
