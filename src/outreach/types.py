@@ -60,7 +60,6 @@ class Contact:
     email_status: EmailStatus
     provider: str | None
     looked_up_at: datetime | None
-    contacted_at: datetime | None
 
 
 @dataclass(frozen=True)
@@ -103,6 +102,58 @@ class Location:
     country: str = "US"  # ISO 3166 alpha-2
     state: str | None = None  # US state code; only with country "US"
     city: str | None = None
+
+
+@dataclass(frozen=True)
+class RunFilters:
+    """What a run was narrowed to; stored on the run so a report can say so."""
+    sectors: tuple[str, ...] = ()
+    sizes: tuple[str, ...] = ()
+    location: Location = Location()
+    work_modes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CompanyInfo:
+    """What one run knows about one company, beyond the company itself."""
+    position: int  # the order the run considered it in
+    source: str  # "board" | "hn" | "hunter" | "hunter_hiring"
+    sector: str | None = None
+    size: str | None = None
+    fit: str = "fits"  # "fits" | "unknown" | "no", against the run's filters
+    guessed_domain: bool = False
+
+
+@dataclass(frozen=True)
+class Spend:
+    """Hunter credits a run used, in tenths of a credit."""
+    balance_before: int | None = None
+    emails: int = 0
+    verifications: int = 0
+    spent: int = 0
+
+
+@dataclass(frozen=True)
+class RunInfo:
+    """A stored run. Runs recorded before v4 have no kind, people, filters or spend."""
+    run_id: int
+    kind: str | None
+    role: str
+    people: str | None
+    filters: RunFilters | None
+    started_at: datetime
+    schema_version: int
+    spend: Spend | None
+
+
+@dataclass(frozen=True)
+class EmailedEntry:
+    """An address marked as emailed, with whatever a stored contact tells about it."""
+    address: str
+    emailed_on: date
+    full_name: str | None = None
+    title: str | None = None
+    company: str | None = None
 
 
 @dataclass(frozen=True)

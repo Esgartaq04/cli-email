@@ -101,6 +101,41 @@ MIGRATIONS: tuple[str, ...] = (
     PRAGMA user_version = 3;
     COMMIT;
     """,
+    # v4: what kind of run it was, which people list it bought, what it was
+    # filtered to and what it spent; one row per company with what the run
+    # knows about it; the contacts shown for it, in order; and the emailed
+    # list, seeded from the old per-contact `contacted_at` marks. That column
+    # stays in `contacts` (SQLite cannot drop it cheaply) but nothing reads it.
+    """
+    BEGIN;
+
+    ALTER TABLE runs ADD COLUMN kind TEXT;
+    ALTER TABLE runs ADD COLUMN people TEXT;
+    ALTER TABLE runs ADD COLUMN filters TEXT;
+    ALTER TABLE runs ADD COLUMN spend TEXT;
+
+    CREATE TABLE run_company_info (
+      id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL REFERENCES runs(id),
+      company_id INTEGER NOT NULL REFERENCES companies(id), position INTEGER NOT NULL,
+      source TEXT NOT NULL CHECK (source IN ('board','hn','hunter','hunter_hiring')),
+      sector TEXT, size TEXT, fit TEXT NOT NULL CHECK (fit IN ('fits','unknown','no')),
+      guessed_domain INTEGER NOT NULL DEFAULT 0, UNIQUE (run_id, company_id));
+
+    CREATE TABLE run_contacts (
+      id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL REFERENCES runs(id),
+      company_id INTEGER NOT NULL REFERENCES companies(id),
+      contact_id INTEGER NOT NULL REFERENCES contacts(id), position INTEGER NOT NULL,
+      UNIQUE (run_id, contact_id));
+
+    CREATE TABLE emailed (address TEXT PRIMARY KEY, emailed_on TEXT NOT NULL, added_at TEXT NOT NULL);
+
+    INSERT OR IGNORE INTO emailed (address, emailed_on, added_at)
+      SELECT lower(email), substr(contacted_at, 1, 10), contacted_at FROM contacts
+      WHERE contacted_at IS NOT NULL AND email IS NOT NULL;
+
+    PRAGMA user_version = 4;
+    COMMIT;
+    """,
 )
 
 

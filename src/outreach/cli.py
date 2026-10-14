@@ -13,7 +13,9 @@ from outreach.net.fetcher import Fetcher, build_user_agent
 from outreach.pipeline.context import RunContext
 from outreach.store.db import connect
 from outreach.store.dimensions import CompanyRepo, ContactRepo
-from outreach.store.runs import FetchAttemptRepo, HNPostRepo, PostingRepo, RunRepo
+from outreach.store.emailed import EmailedRepo
+from outreach.store.runs import (CompanyInfoRepo, FetchAttemptRepo, HNPostRepo, PostingRepo,
+                                 RunContactRepo, RunRepo)
 
 app = typer.Typer(help="Find the right people to email at the right companies.")
 
@@ -62,7 +64,8 @@ def build_context(config_path: Path = Path("config.toml")) -> RunContext:
         config=config, today=date.today(),
         companies=CompanyRepo(conn), contacts=ContactRepo(conn), runs=RunRepo(conn),
         postings=PostingRepo(conn), fetch_attempts=FetchAttemptRepo(conn),
-        hn_posts=HNPostRepo(conn),
+        hn_posts=HNPostRepo(conn), company_info=CompanyInfoRepo(conn),
+        run_contacts=RunContactRepo(conn), emailed=EmailedRepo(conn),
         fetcher=fetcher, llm=llm, job_board=job_board, hn=hn,
     )
 

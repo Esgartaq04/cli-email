@@ -12,6 +12,14 @@ def _dt(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
+def row_to_contact(row: sqlite3.Row) -> Contact:
+    """A `contacts` row as a Contact. The table's `contacted_at` column is not
+    read: marks live on the emailed list now."""
+    return Contact(row["id"], row["company_id"], row["full_name"], row["title"],
+                   row["profile_url"], row["email"], row["email_status"],
+                   row["provider"], _dt(row["looked_up_at"]))
+
+
 class CompanyRepo:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
@@ -84,25 +92,15 @@ class ContactRepo:
         ).fetchone()
         return int(row["id"])
 
-    def _row_to_contact(self, row: sqlite3.Row) -> Contact:
-        return Contact(row["id"], row["company_id"], row["full_name"], row["title"],
-                       row["profile_url"], row["email"], row["email_status"],
-                       row["provider"], _dt(row["looked_up_at"]), _dt(row["contacted_at"]))
-
     def for_company(self, company_id: int) -> list[Contact]:
         rows = self.conn.execute(
             "SELECT * FROM contacts WHERE company_id = ? ORDER BY id", (company_id,)
         ).fetchall()
-        return [self._row_to_contact(r) for r in rows]
+        return [row_to_contact(r) for r in rows]
 
     def already_resolved(self, company_id: int, full_name: str) -> Contact | None:
         row = self.conn.execute(
             "SELECT * FROM contacts WHERE company_id = ? AND full_name = ?",
             (company_id, full_name),
         ).fetchone()
-        return self._row_to_contact(row) if row else None
-
-    def mark_contacted(self, contact_id: int, when: datetime) -> None:
-        self.conn.execute("UPDATE contacts SET contacted_at = ? WHERE id = ?",
-                          (when.isoformat(), contact_id))
-        self.conn.commit()
+        return row_to_contact(row) if row else None

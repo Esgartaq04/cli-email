@@ -51,15 +51,6 @@ def test_unverified_contact_persists_without_email(tmp_path):
     assert stored.email_status == "unverified"
 
 
-def test_mark_contacted_is_visible_on_next_read(tmp_path):
-    companies, contacts = repos(tmp_path)
-    cid = companies.upsert("foo.com", "Foo", 48, "careers page")
-    person = PersonRef("A B", "CTO", None, "a@foo.com", "verified")
-    contact_id = contacts.upsert(cid, person, "hunter", datetime(2026, 9, 1))
-    contacts.mark_contacted(contact_id, datetime(2026, 9, 5))
-    assert contacts.for_company(cid)[0].contacted_at is not None
-
-
 def test_reresolving_as_unverified_clears_a_previously_verified_email(tmp_path):
     companies, contacts = repos(tmp_path)
     cid = companies.upsert("foo.com", "Foo", 48, "careers page")

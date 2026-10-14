@@ -9,7 +9,9 @@ from outreach.net.fetcher import Fetcher
 from outreach.sources.base import JobBoardSource
 from outreach.sources.hn import HNSource
 from outreach.store.dimensions import CompanyRepo, ContactRepo
-from outreach.store.runs import FetchAttemptRepo, HNPostRepo, PostingRepo, RunRepo
+from outreach.store.emailed import EmailedRepo
+from outreach.store.runs import (CompanyInfoRepo, FetchAttemptRepo, HNPostRepo, PostingRepo,
+                                 RunContactRepo, RunRepo)
 
 
 @dataclass
@@ -30,6 +32,9 @@ class RunContext:
     postings: PostingRepo
     fetch_attempts: FetchAttemptRepo
     hn_posts: HNPostRepo
+    company_info: CompanyInfoRepo
+    run_contacts: RunContactRepo
+    emailed: EmailedRepo
     fetcher: Fetcher | None = None
     llm: LLMClient | None = None
     job_board: JobBoardSource | None = None

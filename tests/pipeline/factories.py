@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -16,9 +16,10 @@ from outreach.sources.hn import FakeHNSource
 from outreach.sources.jobboards.fake import FakeJobBoardSource
 from outreach.store.db import connect
 from outreach.store.dimensions import CompanyRepo, ContactRepo
-from outreach.store.runs import (FetchAttemptRepo, HNPostRepo, PostingRepo,
-                                 RunRepo)
-from outreach.types import PostingRef
+from outreach.store.emailed import EmailedRepo
+from outreach.store.runs import (CompanyInfoRepo, FetchAttemptRepo, HNPostRepo, PostingRepo,
+                                 RunContactRepo, RunRepo)
+from outreach.types import PostingRef, RunFilters
 
 TODAY = date(2026, 9, 21)
 
@@ -49,11 +50,19 @@ def build_context(*, postings: Sequence[PostingRef] = (),
         postings=PostingRepo(conn), fetch_attempts=FetchAttemptRepo(conn),
         # No thread by default: pipeline tests see no HN companies.
         hn_posts=HNPostRepo(conn), hn=FakeHNSource(),
+        company_info=CompanyInfoRepo(conn), run_contacts=RunContactRepo(conn),
+        emailed=EmailedRepo(conn),
         fetcher=Fetcher(httpx.Client(transport=_transport(routes or {})),
                         sleep=lambda seconds: None),
         llm=FakeLLM(titles=["backend engineer"]),
         job_board=FakeJobBoardSource(list(postings)),
     )
+
+
+def start_run(ctx: RunContext, kind: str = "companies", people: str = "hiring",
+              filters: RunFilters = RunFilters()) -> int:
+    """A run recorded the way the pipeline does it, on the fixed test date."""
+    return ctx.runs.start(kind, "", filters, people, datetime(2026, 9, 21, 9))
 
 
 def company_id(ctx: RunContext, domain: str) -> int:
