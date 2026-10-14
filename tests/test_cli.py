@@ -13,11 +13,15 @@ from outreach.cli import app, build_context
 from outreach.config import DEFAULT_PEOPLE, ConfigError, load_config
 from outreach.contacts.fake import FakePeopleFinder
 from outreach.contacts.hunter import HunterAPIError
+from outreach.llm.fake import FakeLLM
 from outreach.sources.companies import CompanyQuery, FakeCompanySearch, FoundCompany
+from outreach.sources.hn import FakeHNSource
+from outreach.sources.jobboards.fake import FakeJobBoardSource
 from outreach.store.db import connect
 from outreach.store.dimensions import CompanyRepo, ContactRepo
 from outreach.store.runs import RunRepo
-from outreach.types import FoundPerson, Location, PersonRef, RunFilters
+from outreach.types import FoundPerson, Location, PersonRef, PostingRef, RunFilters
+from tests.pipeline.factories import hn_thread
 
 _TEST_CONFIG = """\
 [paths]
@@ -34,6 +38,19 @@ SPONSORS_FIRST_TIER = DEFAULT_PEOPLE["sponsors"].tiers[0]
 HIRING_FIRST_TIER = DEFAULT_PEOPLE["hiring"].tiers[0]
 NO_MATCH = ('No company matched these filters. Try another sector ("outreach sectors <word>") '
             "or a wider size or location.")
+NO_JOB_MATCH = ("No company matched. Try another role, fewer filters, or add board tokens "
+                "in config.toml.")
+NO_CONTACT_EMAIL = ("Warning: OUTREACH_CONTACT_EMAIL is not set -- requests will identify this "
+                    "tool but name no one to contact about them.")
+NO_TOKENS_NO_HN = ("Warning: no board tokens in config.toml and HN discovery is off -- companies "
+                   "can only come from Hunter's hiring search.")
+# The recorded "Who is hiring?" thread, read for the role "Backend Engineer" in the US.
+HN_FUNNEL = ("HN: Ask HN: Who is hiring? (September 2026) — 11 posts, 8 match the role, "
+             "5 parsed, 3 would need the LLM fallback, 4 kept after the cap.")
+SOLO_POST = (303, 'Solo Labs | Backend Engineer | Remote (US) | REMOTE<p>We build streaming payroll '
+                  'for restaurants. <a href="https://sololabs.ai">sololabs.ai</a>')
+FERNWOOD_POST = (304, 'Fernwood | Backend Engineer | Remote (US) | REMOTE<p>We make field-service '
+                      'software. <a href="https://fernwood.dev">fernwood.dev</a>')
 
 
 @pytest.fixture(autouse=True)
@@ -109,6 +126,26 @@ def _someone_to_buy(monkeypatch, first_tier, searched=None):
         return [FoundPerson("Dana Okafor", "Head of Partnerships", f"dana@{domain}", None,
                             "valid", date.today())]
     monkeypatch.setattr(FakePeopleFinder, "search_people", search_people)
+
+
+def _hn_has(monkeypatch, thread, reads=None):
+    """The fake HN source returns `thread`; each time it is read, 1 is appended to `reads`."""
+    def latest_thread(self):
+        if reads is not None:
+            reads.append(1)
+        return thread
+    monkeypatch.setattr(FakeHNSource, "latest_thread", latest_thread)
+
+
+def _boards_have(monkeypatch, *postings):
+    monkeypatch.setattr(FakeJobBoardSource, "search",
+                        lambda self, role_terms, region: list(postings))
+
+
+def _board_posting(domain, mode):
+    where = "Remote" if mode == "remote" else "Austin, TX"
+    return PostingRef(domain.split(".")[0].title(), domain, "Backend Engineer",
+                      f"https://boards.example/{domain}/1", where, mode, "full_time")
 
 
 def _report_path(output: str) -> Path:
@@ -547,6 +584,397 @@ def test_resuming_a_run_whose_people_list_is_gone_exits_2(monkeypatch):
 
     assert result.exit_code == 2
     assert 'Unknown people list "gone". Known lists: hiring, sponsors.' in result.stderr
+
+
+# --- jobs: checks before anything runs ---------------------------------------------
+
+def test_jobs_needs_the_anthropic_key(monkeypatch, tmp_path):
+    _no_keys_no_fakes(monkeypatch)
+    monkeypatch.setenv("HUNTER_API_KEY", "test")  # only the Anthropic key is missing
+
+    result = runner.invoke(app, ["jobs", "--role", "Backend Engineer", "--dry-run"])
+
+    assert result.exit_code == 2
+    assert "ANTHROPIC_API_KEY" in result.output
+    assert not (tmp_path / "data").exists()  # the keys are checked before the database is opened
+
+
+@pytest.mark.parametrize("flags", [[], ["--role", "  "]])
+def test_jobs_without_a_role_exits_2(monkeypatch, flags):
+    _context_is_never_built(monkeypatch)
+
+    result = runner.invoke(app, ["jobs", *flags, "--dry-run"])
+
+    assert result.exit_code == 2
+    assert "--role is required" in result.output
+
+
+def test_bad_work_mode_exits_before_anything_runs(monkeypatch):
+    _context_is_never_built(monkeypatch)
+
+    result = runner.invoke(
+        app, ["jobs", "--role", "Backend Engineer", "--work-mode", "sometimes", "--dry-run"])
+
+    assert result.exit_code == 2
+    assert "sometimes" in result.output
+
+
+@pytest.mark.parametrize("args, config, message", [
+    # Each case would fail at a later check too; the first check in the order is the one heard.
+    pytest.param(["--work-mode", "sometimes"], _TEST_CONFIG, "--role is required", id="role"),
+    pytest.param(["--role", "X", "--work-mode", "sometimes", "--sector", "software developement"],
+                 "[paths\ndb = ", "sometimes", id="work-mode"),
+    pytest.param(["--role", "X", "--sector", "software developement"], "[paths\ndb = ",
+                 "Did you mean: Software Development", id="filters"),
+    pytest.param(["--role", "X", "--people", "nobody"], "[paths\ndb = ", "config.toml",
+                 id="config"),
+    pytest.param(["--role", "X", "--people", "nobody"], _TEST_CONFIG,
+                 'Unknown people list "nobody"', id="people"),
+])
+def test_jobs_checks_its_arguments_in_a_fixed_order(monkeypatch, args, config, message):
+    _context_is_never_built(monkeypatch)
+    Path("config.toml").write_text(config, encoding="utf-8")
+
+    result = runner.invoke(app, ["jobs", *args, "--dry-run"])
+
+    assert result.exit_code == 2
+    assert message in result.output
+
+
+def test_a_jobs_dry_run_cannot_resume(monkeypatch):
+    _context_is_never_built(monkeypatch)
+
+    result = runner.invoke(app, ["jobs", "--resume", "1", "--dry-run"])
+
+    assert result.exit_code == 2
+    assert "--dry-run" in result.output and "--resume" in result.output
+
+
+# --- jobs: warnings ----------------------------------------------------------------
+
+@pytest.mark.parametrize("off", ["flag", "config"])
+def test_warns_when_there_are_no_tokens_and_hn_is_off(monkeypatch, off):
+    _fakes(monkeypatch)
+    flags = ["--no-hn"] if off == "flag" else []
+    if off == "config":
+        Path("config.toml").write_text(_TEST_CONFIG + "\n[hn]\nenabled = false\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["jobs", "--role", "Backend Engineer", "--dry-run", *flags])
+
+    assert result.exit_code == 0, result.output
+    assert NO_TOKENS_NO_HN in result.stderr.splitlines()
+    assert "Warning" not in result.stdout
+
+
+@pytest.mark.parametrize("tokens, flags", [
+    ('lever_tokens = ["acme"]', ["--no-hn"]),  # HN is off, but a board is searched
+    ("", []),  # no board, but HN is searched
+])
+def test_there_is_no_token_warning_while_a_source_remains(monkeypatch, tokens, flags):
+    _fakes(monkeypatch)
+    Path("config.toml").write_text(
+        _TEST_CONFIG.replace("greenhouse_tokens = []", f"greenhouse_tokens = []\n{tokens}"),
+        encoding="utf-8")
+
+    result = runner.invoke(app, ["jobs", "--role", "Backend Engineer", "--dry-run", *flags])
+
+    assert result.exit_code == 0, result.output
+    assert NO_TOKENS_NO_HN not in result.stderr
+
+
+def test_the_contact_email_warning_is_for_jobs_only(monkeypatch):
+    _fakes(monkeypatch)
+    monkeypatch.delenv("OUTREACH_CONTACT_EMAIL", raising=False)
+    jobs = ["jobs", "--role", "Backend Engineer", "--dry-run"]
+
+    blank = runner.invoke(app, jobs)
+    companies = runner.invoke(app, ["companies", "--sector", "Software Development", "--dry-run"])
+    monkeypatch.setenv("OUTREACH_CONTACT_EMAIL", "   ")
+    spaces = runner.invoke(app, jobs)
+    monkeypatch.setenv("OUTREACH_CONTACT_EMAIL", "me@example.com")
+    given = runner.invoke(app, jobs)
+
+    assert all(r.exit_code == 0 for r in (blank, companies, spaces, given))
+    assert NO_CONTACT_EMAIL in blank.stderr.splitlines()
+    assert NO_CONTACT_EMAIL in spaces.stderr.splitlines()
+    assert "OUTREACH_CONTACT_EMAIL" not in companies.stderr
+    assert "OUTREACH_CONTACT_EMAIL" not in given.stderr
+    assert "Warning" not in blank.stdout
+
+
+def test_a_contact_email_in_dot_env_is_not_warned_about(monkeypatch):
+    """.env is read when the context is built, so the address is looked for after that."""
+    _fakes(monkeypatch)
+    monkeypatch.delenv("OUTREACH_CONTACT_EMAIL", raising=False)
+    monkeypatch.setattr(
+        "outreach.cli.load_dotenv",
+        lambda *args, **kwargs: monkeypatch.setenv("OUTREACH_CONTACT_EMAIL", "me@example.com"))
+
+    result = runner.invoke(app, ["jobs", "--role", "Backend Engineer", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "OUTREACH_CONTACT_EMAIL" not in result.stderr
+
+
+# --- jobs: dry run -----------------------------------------------------------------
+
+def test_jobs_dry_run_reports_the_hn_funnel_without_llm_calls(monkeypatch):
+    _fakes(monkeypatch)
+    _hn_has(monkeypatch, hn_thread())
+    asked = []
+
+    def parse_job_post(self, text):
+        asked.append(text)
+        raise AssertionError("a dry run called the LLM fallback")
+    monkeypatch.setattr(FakeLLM, "parse_job_post", parse_job_post)
+
+    result = runner.invoke(app, ["jobs", "--role", "Backend Engineer", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    lines = result.stdout.splitlines()
+    assert HN_FUNNEL in lines
+    assert ("Found: 0 from job boards, 4 from HN, 0 from Hunter's hiring search; "
+            "0 left out by your filters.") in lines
+    assert asked == []
+
+
+@pytest.mark.parametrize("extra", [["--dry-run"], []])
+def test_no_hn_flag_disables_discovery(monkeypatch, extra):
+    _fakes(monkeypatch)
+    reads = []
+    _hn_has(monkeypatch, hn_thread(), reads)
+
+    flagged = runner.invoke(app, ["jobs", "--role", "Backend Engineer", "--no-hn", *extra])
+    assert flagged.exit_code == 0, flagged.output
+    assert reads == [] and "HN:" not in flagged.stdout
+
+    unflagged = runner.invoke(app, ["jobs", "--role", "Backend Engineer", *extra])
+    assert unflagged.exit_code == 0, unflagged.output
+    assert reads == [1]
+    if extra:
+        assert "HN: Ask HN: Who is hiring?" in unflagged.stdout
+
+
+def test_jobs_dry_run_counts_each_source(monkeypatch):
+    _fakes(monkeypatch)
+    queries = []
+    _hunter_finds(monkeypatch, "h", people=3, balance=500, queries=queries)
+    asked = []
+
+    def count_people(self, domain):
+        asked.append(domain)
+        return 3
+    monkeypatch.setattr(FakePeopleFinder, "count_people", count_people)
+    _boards_have(monkeypatch, _board_posting("lakeside.example", "remote"),
+                 _board_posting("onsite.example", "onsite"))
+    _hn_has(monkeypatch, hn_thread(item_ids=[], extra=[SOLO_POST, FERNWOOD_POST]))
+
+    result = runner.invoke(app, ["jobs", "--role", "Backend Engineer", "--work-mode", "remote",
+                                 "--location", "US", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.splitlines() == [
+        "Filters: any sector · any size · United States · remote",
+        "HN: Ask HN: Who is hiring? (September 2026) — 2 posts, 2 match the role, 2 parsed, "
+        "0 would need the LLM fallback, 2 kept after the cap.",
+        "Found: 1 from job boards, 2 from HN, 1 from Hunter's hiring search; "
+        "1 left out by your filters.",
+        "Skipped: 0 on an earlier list, 0 where you've emailed someone, 0 with no one matching.",
+        "Dry run: up to 4 companies would be bought, at most 18 credits; 50 left.",
+    ]
+    # Priced in the order a run buys at them, and without the company the work mode left out.
+    assert asked == ["lakeside.example", "sololabs.ai", "fernwood.dev", "h.example"]
+    assert queries == [CompanyQuery((), (), Location("US"), hiring_titles=("Backend Engineer",))]
+
+
+def test_a_jobs_dry_run_starts_no_run_and_writes_nothing(monkeypatch, tmp_path):
+    _fakes(monkeypatch)
+    _hunter_finds(monkeypatch, "a", "b")
+    _boards_have(monkeypatch, _board_posting("lakeside.example", "remote"))
+    _hn_has(monkeypatch, hn_thread())
+
+    result = runner.invoke(app, ["jobs", "--role", "Backend Engineer", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert [_count(table) for table in ("runs", "companies", "run_company_info", "contacts",
+                                        "run_postings", "run_hn_posts")] == [0] * 6
+    assert not (tmp_path / "reports").exists()
+
+
+def test_a_jobs_dry_run_says_which_source_failed(monkeypatch):
+    _fakes(monkeypatch)
+
+    def rate_limited(self, query):
+        raise HunterAPIError("Hunter discover returned HTTP 429")
+    monkeypatch.setattr(FakeCompanySearch, "search", rate_limited)
+
+    result = runner.invoke(app, ["jobs", "--role", "Backend Engineer", "--dry-run"])
+
+    assert result.exit_code == 0, result.output  # the other sources still count, as in a real run
+    assert "Warning: hunter: Hunter discover returned HTTP 429" in result.stderr.splitlines()
+    assert ("Found: 0 from job boards, 0 from HN, 0 from Hunter's hiring search; "
+            "0 left out by your filters.") in result.stdout.splitlines()
+
+
+@pytest.mark.parametrize("extra", [["--dry-run"], []])
+def test_jobs_with_no_match_says_why(monkeypatch, extra):
+    _fakes(monkeypatch)
+
+    result = runner.invoke(app, ["jobs", "--role", "Backend Engineer", *extra])
+
+    assert result.exit_code == 0, result.output
+    assert NO_JOB_MATCH in result.stdout.splitlines()
+    if extra:
+        assert "Dry run:" not in result.stdout  # nothing to price, so no balance is read
+    else:  # the run is still recorded, and says so before saying why it is empty
+        assert result.stdout.startswith("Run 1: contacts bought at 0 companies, 0 credits used.")
+
+
+# --- jobs: real run ----------------------------------------------------------------
+
+def test_jobs_run_writes_a_report(monkeypatch, tmp_path):
+    _fakes(monkeypatch)
+    queries = []
+    _hunter_finds(monkeypatch, "a", "b", queries=queries)
+    _someone_to_buy(monkeypatch, HIRING_FIRST_TIER)
+
+    result = runner.invoke(app, ["jobs", "--role", "Backend Engineer"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.splitlines()[0].startswith(
+        "Run 1: contacts bought at 2 companies, 2 credits used. Report: ")
+    assert "ran out" not in result.stdout and NO_JOB_MATCH not in result.stdout
+    path = _report_path(result.stdout)
+    assert path.exists() and path.parent == Path("reports")
+    assert [p.name for p in (tmp_path / "reports").iterdir()] == [path.name]
+    html = path.read_text(encoding="utf-8")
+    assert "A Co" in html and "dana@a.example" in html
+    assert queries == [CompanyQuery((), (), Location("US"), hiring_titles=("Backend Engineer",))]
+    with contextlib.closing(connect(DB)) as conn:
+        info = RunRepo(conn).info(1)
+    assert (info.kind, info.role, info.people) == ("jobs", "Backend Engineer", "hiring")
+
+
+@pytest.mark.parametrize("flags, stored", [
+    ([], ("hybrid", "onsite", "remote")),
+    (["--work-mode", "remote, hybrid"], ("hybrid", "remote")),
+])
+def test_jobs_stores_the_work_modes_sorted(monkeypatch, flags, stored):
+    _fakes(monkeypatch)
+    _hunter_finds(monkeypatch, "a")
+
+    result = runner.invoke(app, ["jobs", "--role", "Backend Engineer", "--sector", "Banking",
+                                 "--size", "51-200", "--location", "TX", *flags])
+
+    assert result.exit_code == 0, result.output
+    with contextlib.closing(connect(DB)) as conn:
+        info = RunRepo(conn).info(1)
+    assert info.filters == RunFilters(("Banking",), ("51-200",), Location("US", "TX"), stored)
+
+
+def test_jobs_says_when_credits_ran_out(monkeypatch):
+    _fakes(monkeypatch)
+    _hunter_finds(monkeypatch, "a", "b", balance=0)
+
+    result = runner.invoke(app, ["jobs", "--role", "Backend Engineer"])
+
+    assert result.exit_code == 0, result.output
+    lines = result.stdout.splitlines()
+    assert lines[0].startswith("Run 1: contacts bought at 0 companies, 0 credits used. Report: ")
+    assert lines[1:] == ["2 companies were not bought because credits ran out."]
+
+
+def test_jobs_uses_the_configured_people_list_unless_told_otherwise(monkeypatch):
+    _fakes(monkeypatch)
+    _hunter_finds(monkeypatch, "a")
+    Path("config.toml").write_text(_TEST_CONFIG + '\n[jobs]\npeople = "sponsors"\n',
+                                   encoding="utf-8")
+
+    default = runner.invoke(app, ["jobs", "--role", "Backend Engineer"])
+    named = runner.invoke(app, ["jobs", "--role", "Backend Engineer", "--people", "hiring"])
+
+    assert default.exit_code == 0 and named.exit_code == 0
+    with contextlib.closing(connect(DB)) as conn:
+        runs = RunRepo(conn)
+        assert (runs.info(1).people, runs.info(2).people) == ("sponsors", "hiring")
+
+
+# --- jobs --resume -----------------------------------------------------------------
+
+def test_jobs_resume_buys_with_the_runs_own_role_people_and_filters(monkeypatch):
+    _fakes(monkeypatch)
+    _hunter_finds(monkeypatch, "a", "b", balance=0)
+    first = runner.invoke(app, [
+        "jobs", "--role", "Backend Engineer", "--sector", "Software Development",
+        "--size", "51-200", "--location", "TX", "--work-mode", "remote", "--people", "sponsors"])
+    assert first.exit_code == 0, first.output
+    assert "2 companies were not bought" in first.stdout
+
+    # Credits arrive. Resuming must not search again, and the flags name other things.
+    searches = []
+
+    def search(self, query):
+        searches.append(query)
+        return []
+    monkeypatch.setattr(FakeCompanySearch, "search", search)
+    monkeypatch.setattr(FakePeopleFinder, "balance_tenths", lambda self: 500)
+    searched = []
+    _someone_to_buy(monkeypatch, SPONSORS_FIRST_TIER, searched)
+    seen = []
+    real = cli.run_jobs
+
+    def spy(ctx, role, filters, work_modes, people, *, use_hn=True, resume_run_id=None):
+        seen.append((role, filters, work_modes, people.name, resume_run_id))
+        return real(ctx, role, filters, work_modes, people, use_hn=use_hn,
+                    resume_run_id=resume_run_id)
+    monkeypatch.setattr("outreach.cli.run_jobs", spy)
+
+    result = runner.invoke(
+        app, ["jobs", "--resume", "1", "--people", "hiring", "--sector", "Banking"])
+
+    assert result.exit_code == 0, result.output
+    assert seen == [("Backend Engineer",
+                     RunFilters(("Software Development",), ("51-200",), Location("US", "TX"),
+                                ("remote",)),
+                     frozenset({"remote"}), "sponsors", 1)]
+    assert searches == []
+    assert searched and set(searched) <= set(DEFAULT_PEOPLE["sponsors"].tiers)
+    assert result.stdout.splitlines()[0].startswith(
+        "Run 1: contacts bought at 2 companies, 2 credits used. Report: ")
+    assert NO_JOB_MATCH not in result.stdout  # a resume reports no search, so not "found nothing"
+    assert _count("runs") == 1
+
+
+@pytest.mark.parametrize("run_id", [1, 99])  # a companies run, and no run at all
+def test_resuming_what_is_not_a_job_run_exits_1(monkeypatch, run_id):
+    _fakes(monkeypatch)
+    _start_run(kind="companies", people="sponsors")
+
+    result = runner.invoke(app, ["jobs", "--resume", str(run_id)])
+
+    assert result.exit_code == 1
+    assert result.stderr.strip() == f"Run {run_id} is not a job run."
+
+
+def test_resuming_a_job_run_whose_people_list_is_gone_exits_2(monkeypatch):
+    _fakes(monkeypatch)
+    _start_run(kind="jobs", people="gone")
+
+    result = runner.invoke(app, ["jobs", "--resume", "1"])
+
+    assert result.exit_code == 2
+    assert 'Unknown people list "gone". Known lists: hiring, sponsors.' in result.stderr
+
+
+def test_a_resume_has_no_search_to_warn_about(monkeypatch):
+    _fakes(monkeypatch)
+    _start_run(kind="jobs", people="hiring")
+
+    result = runner.invoke(app, ["jobs", "--resume", "1", "--no-hn"])
+
+    assert result.exit_code == 0, result.output
+    assert NO_TOKENS_NO_HN not in result.stderr
+    assert NO_JOB_MATCH not in result.stdout
 
 
 # --- sectors -----------------------------------------------------------------------

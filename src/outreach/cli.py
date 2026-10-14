@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import NoReturn, Sequence
@@ -15,11 +16,13 @@ from outreach.contacts.hunter import HunterAPIError
 from outreach.core.addresses import normalize_address
 from outreach.core.filters import (SIZE_BANDS, FilterError, describe_filters, parse_location,
                                    parse_sectors, parse_sizes, search_sectors)
+from outreach.core.workmode import parse_work_modes
 from outreach.credits import format_credits
 from outreach.net.fetcher import Fetcher, build_user_agent
 from outreach.pipeline.companies import run_companies
 from outreach.pipeline.context import RunContext
 from outreach.pipeline.contacts import max_cost, preview_contacts
+from outreach.pipeline.jobs import SOURCES, find_job_prospects, run_jobs
 from outreach.pipeline.summary import RunSummary
 from outreach.render.contact_report import build_contact_view, write_contact_report
 from outreach.sectors import load_sectors
@@ -29,7 +32,7 @@ from outreach.store.dimensions import CompanyRepo, ContactRepo
 from outreach.store.emailed import EmailedRepo
 from outreach.store.runs import (CompanyInfoRepo, FetchAttemptRepo, HNPostRepo, PostingRepo,
                                  RunContactRepo, RunRepo)
-from outreach.types import RunFilters
+from outreach.types import RunFilters, WorkMode
 
 app = typer.Typer(help="Find the right people to email at the right companies.")
 emailed_app = typer.Typer(help="Keep track of who you've emailed.")
@@ -40,6 +43,10 @@ CONFIG_PATH = Path("config.toml")
 _FIRST_REPORTABLE_SCHEMA = 4
 _NO_COMPANY_MATCHED = ('No company matched these filters. Try another sector '
                        '("outreach sectors <word>") or a wider size or location.')
+_NO_JOB_MATCHED = ("No company matched. Try another role, fewer filters, "
+                   "or add board tokens in config.toml.")
+_DRY_RUN_WITH_RESUME = ("--dry-run can't be combined with --resume: a resume buys at companies "
+                        "an earlier run already found.")
 
 
 def build_context(config: Config, *, need_llm: bool, need_hunter: bool = True) -> RunContext:
@@ -214,8 +221,7 @@ def companies(
     if resume is None and not sector:
         _fail("--sector is required")
     if resume is not None and dry_run:
-        _fail("--dry-run can't be combined with --resume: a resume buys at companies "
-              "an earlier run already found.")
+        _fail(_DRY_RUN_WITH_RESUME)
     filters = _parse_filters(sector, size, location)
     config = _load_config()
     if resume is None:
@@ -260,6 +266,120 @@ def _companies_dry_run(ctx: RunContext, filters: RunFilters, people: PeopleList)
         typer.echo(_NO_COMPANY_MATCHED)
         return
     _print_dry_run_cost(ctx, people, [company.domain for company in found])
+
+
+# --- jobs ----------------------------------------------------------------------------
+
+@app.command()
+def jobs(
+    role: str | None = typer.Option(
+        None, "--role", help='The job title to look for, such as "Backend Engineer".'),
+    sector: list[str] | None = typer.Option(
+        None, "--sector",
+        help='A sector name; repeat it for more ("outreach sectors" lists them).'),
+    size: list[str] | None = typer.Option(
+        None, "--size", help="A company size band such as 51-200; repeat it for more."),
+    location: str | None = typer.Option(
+        None, "--location",
+        help='Where the job and the company are: "TX", "Austin, TX" or "Canada". '
+             'Default: the US.'),
+    work_mode: str | None = typer.Option(
+        None, "--work-mode",
+        help="Comma-separated remote, hybrid, onsite. Default: all three."),
+    people: str | None = typer.Option(
+        None, "--people", help="The people list to buy. Default: jobs.people in config.toml."),
+    no_hn: bool = typer.Option(
+        False, "--no-hn", help='Skip discovery from HN\'s "Who is hiring?" thread.'),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Count the companies and price the run without starting it."),
+    resume: int | None = typer.Option(
+        None, "--resume",
+        help="Finish an earlier job run, with the role, filters and people list it used."),
+) -> None:
+    """Find companies hiring for a role and buy the contacts there."""
+    if resume is None and not (role and role.strip()):
+        _fail("--role is required")
+    if resume is not None and dry_run:
+        _fail(_DRY_RUN_WITH_RESUME)
+    try:
+        work_modes = parse_work_modes(work_mode)
+    except ValueError as exc:
+        _fail(str(exc))
+    filters = replace(_parse_filters(sector, size, location), work_modes=tuple(sorted(work_modes)))
+    config = _load_config()
+    if resume is None:
+        people_list = _people_list(config, people or config.jobs_people)
+    ctx = _context(config, need_llm=True)
+
+    if resume is not None:
+        # The run is finished with what it was started with, not with this call's flags.
+        info = ctx.runs.info(resume)
+        if info is None or info.kind != "jobs":
+            _fail(f"Run {resume} is not a job run.", 1)
+        role, filters, people_list = info.role, info.filters, _people_list(config, info.people)
+        work_modes = frozenset(filters.work_modes)
+    # Only now: building the context is what reads .env, where the address may be.
+    _warn_about_the_setup(config, searching=resume is None, use_hn=not no_hn)
+
+    if dry_run:
+        _jobs_dry_run(ctx, role, filters, work_modes, people_list, use_hn=not no_hn)
+        return
+    summary = run_jobs(ctx, role, filters, work_modes, people_list, use_hn=not no_hn,
+                       resume_run_id=resume)
+    _print_run(summary, _write_report(ctx, summary.run_id, summary))
+    # A resume runs no search, so it has nothing to say about what was found.
+    if resume is None and not any(_found_counts(summary)):
+        typer.echo(_NO_JOB_MATCHED)
+
+
+def _warn_about_the_setup(config: Config, *, searching: bool, use_hn: bool) -> None:
+    """Warn about the two setups that make a job run worse. Neither stops it."""
+    if not os.environ.get("OUTREACH_CONTACT_EMAIL", "").strip():
+        # The user agent still identifies the tool, but without a contact address a
+        # site operator who notices this traffic has no one to reach about it.
+        typer.echo(
+            "Warning: OUTREACH_CONTACT_EMAIL is not set -- requests will "
+            "identify this tool but name no one to contact about them.", err=True)
+    discovery = config.discovery
+    boards = discovery.greenhouse_tokens or discovery.ashby_tokens or discovery.lever_tokens
+    if searching and not boards and not (use_hn and config.hn.enabled):
+        typer.echo(
+            "Warning: no board tokens in config.toml and HN discovery is off -- "
+            "companies can only come from Hunter's hiring search.", err=True)
+
+
+def _found_counts(summary: RunSummary) -> tuple[int, ...]:
+    """How many companies each source found, in the order of `SOURCES`. A resume found none."""
+    return tuple(summary.found.get(source, 0) for source in SOURCES)
+
+
+def _jobs_dry_run(ctx: RunContext, role: str, filters: RunFilters,
+                  work_modes: frozenset[WorkMode], people: PeopleList, *, use_hn: bool) -> None:
+    """Everything a run would decide before spending a credit, and nothing it would store.
+
+    Expanding the role is the one paid call, as in a run. Reading HN's posts needs no
+    LLM here: the posts only the fallback could read are counted instead."""
+    typer.echo(f"Filters: {describe_filters(filters)}")
+    terms = ctx.llm.expand_titles(role)
+    summary = RunSummary(run_id=0)  # there is no run, so no id
+    prospects = find_job_prospects(ctx, terms, filters, work_modes, summary,
+                                   use_hn=use_hn, dry_run=True)
+    # A source that failed made the counts below an undercount; a run keeps these in its report.
+    for error in summary.errors:
+        typer.echo(f"Warning: {error}", err=True)
+    if summary.hn_thread_title is not None:
+        typer.echo(f"HN: {summary.hn_thread_title} — {summary.hn_posts_read} posts, "
+                   f"{summary.hn_role_matched} match the role, {summary.hn_parsed} parsed, "
+                   f"{summary.hn_needs_llm} would need the LLM fallback, "
+                   f"{summary.hn_kept} kept after the cap.")
+    board, hn, hiring = _found_counts(summary)
+    typer.echo(f"Found: {board} from job boards, {hn} from HN, {hiring} from Hunter's hiring "
+               f"search; {summary.left_out} left out by your filters.")
+    kept = [prospect.domain for prospect in prospects if prospect.left_out is None]
+    if not kept:
+        typer.echo(_NO_JOB_MATCHED)
+        return
+    _print_dry_run_cost(ctx, people, kept)
 
 
 # --- sectors -------------------------------------------------------------------------
