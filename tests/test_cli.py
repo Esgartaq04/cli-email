@@ -397,6 +397,23 @@ def test_companies_dry_run_with_an_unreadable_balance_exits_1(monkeypatch):
     assert "Hunter found 3 companies." in result.stdout
 
 
+def test_companies_dry_run_with_a_failing_email_count_exits_1(monkeypatch):
+    _fakes(monkeypatch)
+    _hunter_finds(monkeypatch, "a", "b")
+
+    def rate_limited(self, domain):
+        raise HunterAPIError("Hunter email-count returned HTTP 429")
+    monkeypatch.setattr(FakePeopleFinder, "count_people", rate_limited)
+
+    result = runner.invoke(app, ["companies", "--sector", "Software Development", "--dry-run"])
+
+    assert result.exit_code == 1
+    assert result.stderr.strip() == "Hunter's email count failed: Hunter email-count returned HTTP 429"
+    assert result.exception is None or isinstance(result.exception, SystemExit)  # no traceback
+    assert "Hunter found 2 companies." in result.stdout
+    assert "Dry run" not in result.stdout and "Skipped" not in result.stdout
+
+
 @pytest.mark.parametrize("extra", [["--dry-run"], []])
 def test_companies_with_no_match_says_why(monkeypatch, extra):
     _fakes(monkeypatch)

@@ -158,7 +158,12 @@ def _people_list(config: Config, name: str) -> PeopleList:
 
 def _print_dry_run_cost(ctx: RunContext, people: PeopleList, domains: Sequence[str]) -> None:
     """The last two lines of a dry run: who would be skipped, then the most the rest can cost."""
-    preview = preview_contacts(ctx, people, domains)
+    try:
+        preview = preview_contacts(ctx, people, domains)
+    except HunterAPIError as exc:
+        # The free Email Count calls can be rate limited or refused; a real run survives
+        # that company by company, and a dry run must not end in a traceback either.
+        _fail(f"Hunter's email count failed: {exc}", 1)
     typer.echo(f"Skipped: {preview.earlier_list} on an earlier list, {preview.emailed} where "
                f"you've emailed someone, {preview.no_one} with no one matching.")
     estimate = (f"Dry run: up to {preview.to_buy} companies would be bought, "
