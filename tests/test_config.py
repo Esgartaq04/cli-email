@@ -89,6 +89,18 @@ def test_minimal_config_needs_only_paths(tmp_path):
     assert cfg.ignored == () and ignored_warning(cfg) is None
 
 
+@pytest.mark.parametrize("content, reason", [
+    (b'[paths\ndb = "d.db"\n', "not valid TOML"),
+    (b'[paths]\ndb = "d\xff.db"\n', "not UTF-8 text"),
+])
+def test_a_file_that_cannot_be_read_is_a_config_error_naming_it(tmp_path, content, reason):
+    path = tmp_path / "config.toml"
+    path.write_bytes(content)
+    with pytest.raises(ConfigError, match=re.escape(str(path))) as raised:
+        load_config(path)
+    assert reason in str(raised.value)
+
+
 def test_paths_are_required(tmp_path):
     with pytest.raises(ConfigError, match="paths.db"):
         load_config(write(tmp_path, "[run]\nmax_companies = 5\n"))

@@ -279,8 +279,13 @@ def _run(raw: dict) -> RunConfig:
 def load_config(path: Path) -> Config:
     if not path.exists():
         raise ConfigError(f"config file not found: {path}")
-    with path.open("rb") as handle:
-        raw = tomllib.load(handle)
+    try:
+        with path.open("rb") as handle:
+            raw = tomllib.load(handle)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"{path} is not valid TOML: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"{path} is not UTF-8 text: {exc}") from exc
     ignored = _scan(raw)
     people = _people(raw)
     # Each command's default list is checked once the file's own lists are in, so
