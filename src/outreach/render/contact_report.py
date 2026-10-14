@@ -148,8 +148,7 @@ class _ViewBuilder:
                 with_contacts.append(self._card(company_id, info, company))
             elif status in _NO_ONE_FOUND:
                 no_one_found.append(ListedCompany(
-                    company.name, company.canonical_domain,
-                    f'Hunter has no one matching "{self.people}" — cost nothing'))
+                    company.name, company.canonical_domain, self._no_one_reason(status)))
             elif status in _EARLIER:
                 earlier.append(ListedCompany(company.name, company.canonical_domain,
                                              self._earlier_reason(company_id, company, status)))
@@ -169,6 +168,12 @@ class _ViewBuilder:
         return _COMPANY_RUN_HEADING
 
     # --- why a company has no card ---
+
+    def _no_one_reason(self, status: str) -> str:
+        reason = f'Hunter has no one matching "{self.people}"'
+        # Only a count of zero is free. A search that returned people who were all dropped
+        # (excluded titles) ends `empty` after the addresses were paid for.
+        return f"{reason} — cost nothing" if status == "no_matching_people" else reason
 
     def _earlier_reason(self, company_id: int, company: Company, status: str) -> str:
         if status == "skipped_earlier_list":

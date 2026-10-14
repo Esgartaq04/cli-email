@@ -140,7 +140,8 @@
     <span class="co-domain">{{ c.domain }}</span>
   </div>
   <div class="co-facts">
-    {% if c.sector %}<span>{{ c.sector }}</span>{% elif c.fit_unknown %}<span>sector unknown</span>{% endif %}
+    {% if c.sector %}<span>{{ c.sector }}</span>{% endif %}
+    {% if c.fit_unknown %}<span>sector unknown</span>{% endif %}
     {% if c.size %}<span>{{ c.size }} employees</span>{% endif %}
     {% if c.hq %}<span>HQ {{ c.hq }}</span>{% endif %}
   </div>

@@ -65,7 +65,7 @@ def test_sections_follow_the_contacts_status():
 
     assert [card.name for card in view.with_contacts] == ["A"]
     assert _reasons(view.no_one_found) == {
-        "B": 'Hunter has no one matching "hiring" — cost nothing',
+        "B": 'Hunter has no one matching "hiring"',
         "E": 'Hunter has no one matching "hiring" — cost nothing'}
     assert _reasons(view.earlier) == {"C": "on run 1, 21 Sep 2026 — not bought again"}
     assert _reasons(view.left_out) == {"D": "over this run's cap of 10 companies"}
@@ -231,6 +231,32 @@ def test_a_card_says_what_the_company_is_and_where():
     assert (b.sector, b.size, b.hq, b.fit_unknown) == (None, None, None, True)
     assert "Banking" in html and "11-50" in html and "HQ Texas" in html
     assert html.count("sector unknown") == 1
+
+
+def test_an_unknown_fit_says_sector_unknown_whatever_else_is_known():
+    ctx = build_context(); run_id = start_run(ctx)
+    _bought(ctx, run_id, "a.example", [BO], sector="Banking", size=None, fit="unknown")
+    _bought(ctx, run_id, "b.example", [BO], sector="Banking", size="11-50", fit="fits")
+
+    view = build_contact_view(ctx, run_id)
+    html = render_contact_report(view)
+
+    a, b = view.with_contacts
+    assert (a.sector, a.size, a.fit_unknown) == ("Banking", None, True)
+    assert (b.sector, b.size, b.fit_unknown) == ("Banking", "11-50", False)
+    assert html.count("sector unknown") == 1  # only the card with the unknown fit
+    assert html.count("Banking") == 2 and "11-50 employees" in html
+
+
+def test_a_company_with_nobody_left_after_the_exclusions_does_not_claim_it_cost_nothing():
+    ctx = build_context(); run_id = start_run(ctx)
+    _stopped(ctx, run_id, "b.example", "empty")  # paid for, then every title was excluded
+    _stopped(ctx, run_id, "e.example", "no_matching_people")  # the free count was zero
+
+    html = render_contact_report(build_contact_view(ctx, run_id))
+
+    assert html.count("cost nothing") == 1
+    assert html.count('has no one matching &#34;hiring&#34;') == 2
 
 
 def test_a_hunter_hiring_company_says_so_without_a_link():
