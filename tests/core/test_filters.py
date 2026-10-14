@@ -313,3 +313,46 @@ VA, WV, NM = (Location("US", code) for code in ("VA", "WV", "NM"))
 ])
 def test_posting_in_location_edge_cases(text, mode, where, expected):
     assert posting_in_location(text, mode, where) is expected
+
+
+IL, MA, MN = (Location("US", code) for code in ("IL", "MA", "MN"))
+
+
+@pytest.mark.parametrize("text,mode,where,expected", [
+    # A posting that lists places passes a search for any of them, in any order.
+    ("Austin, TX / New York", "onsite", AUSTIN, True),
+    ("Austin, TX; Chicago, IL", "onsite", AUSTIN, True),
+    ("Chicago, IL; Austin, TX", "onsite", AUSTIN, True),
+    ("Austin, TX | Chicago, IL", "hybrid", AUSTIN, True),
+    ("Dallas, TX / Austin", "onsite", AUSTIN, True),
+    ("Chicago, Illinois; Austin, Texas", "onsite", AUSTIN, True),
+    ("Austin, TX; Chicago, IL", "onsite", TX, True),
+    ("Chicago, IL; Austin, TX", "onsite", TX, True),
+    ("Austin, TX; Chicago, IL", "onsite", IL, True),
+    ("Chicago, IL; Austin, TX", "onsite", IL, True),
+    ("Austin, Texas / Chicago, Illinois", "onsite", TX, True),
+    ("Austin, Texas / Chicago, Illinois", "onsite", IL, True),
+    ("Austin, TX / New York", "onsite", NY, True),
+    ("Austin, TX; Chicago, IL", "onsite", CA, False),
+    # A code that is not at the end still counts.
+    ("Plano, TX (Hybrid)", "hybrid", TX, True),
+    ("Plano, TX (Hybrid)", "hybrid", CA, False),
+    # The right city name in a state that was not asked for is another place.
+    ("Austin, MN", "onsite", TX, False),
+    ("Austin, Minnesota", "onsite", TX, False),
+    ("Austin, MN", "onsite", AUSTIN, False),
+    ("Austin, MN", "onsite", MN, True),
+    ("Austin, MN; Chicago, IL", "onsite", AUSTIN, False),
+    ("Austin, MN / Austin, TX", "onsite", AUSTIN, True),
+    ("Austin, MN / Austin, TX", "onsite", TX, True),
+    # A hub city is read only when the text names no state at all.
+    ("New York", "onsite", NY, True), ("NYC", "onsite", NY, True),
+    ("NYC / Boston", "onsite", NY, True), ("NYC / Boston", "onsite", MA, True),
+    ("Austin", "onsite", TX, True), ("Austin / Chicago", "onsite", IL, True),
+    ("Austin / Chicago, IL", "onsite", IL, True),
+    ("Austin / Chicago, IL", "onsite", TX, False),
+    ("Boston, MA", "hybrid", NY, False), ("Remote - Boston, MA", "hybrid", NY, False),
+    ("Boston, MA", "hybrid", MA, True),
+])
+def test_posting_in_location_reads_every_place_it_names(text, mode, where, expected):
+    assert posting_in_location(text, mode, where) is expected

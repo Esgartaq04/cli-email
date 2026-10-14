@@ -14,9 +14,8 @@ from dataclasses import replace
 from typing import Sequence
 
 # Pure regex over location strings -- no I/O -- shared so a posting is checked
-# for a place the way the US-only scope reads it: same word boundaries, same
-# trailing ", XX" state code.
-from outreach.sources.jobboards.region import _TRAILING_STATE_CODE, _contains_marker
+# for a place the way the US-only scope reads it: same word boundaries.
+from outreach.sources.jobboards.region import _contains_marker
 from outreach.types import Location, WorkMode
 
 SIZE_BANDS: tuple[str, ...] = (
@@ -207,8 +206,10 @@ _STATE_NAME = re.compile(
     + "|".join(re.escape(name) for name in sorted(_NAMED_STATE, key=len, reverse=True))
     + r")(?![a-z0-9])"
 )
-# "Plano, TX, USA" ends in a country, but its state code is still the one that counts.
-_TRAILING_US = re.compile(r",\s*(?:" + "|".join(map(re.escape, sorted(_US_NAMES))) + r")\s*$")
+# A ", XX" code anywhere in the text: "Austin, TX / New York", "Austin, TX; Chicago, IL",
+# "Plano, TX, USA". The two letters must end a word, so ", Texas" and ", USA" are not
+# read as codes; whether they are a state's is checked against _NAME_BY_STATE.
+_STATE_CODE = re.compile(r",\s*([a-z]{2})(?![a-z0-9])")
 
 
 def _has_word(text: str, word: str) -> bool:
@@ -216,11 +217,11 @@ def _has_word(text: str, word: str) -> bool:
 
 
 def _states_named(text: str) -> set[str]:
-    """The US states a lowercased location names: a full name, or ", XX" at the end."""
+    """Every US state a lowercased location names, by full name or by a ", XX" code."""
     named = {_NAMED_STATE[match.group()] for match in _STATE_NAME.finditer(text)}
-    trailing = _TRAILING_STATE_CODE.search(_TRAILING_US.sub("", text))
-    if trailing and trailing.group(1).upper() in _NAME_BY_STATE:
-        named.add(trailing.group(1).upper())
+    for match in _STATE_CODE.finditer(text):
+        if match.group(1).upper() in _NAME_BY_STATE:
+            named.add(match.group(1).upper())
     return named
 
 
@@ -228,11 +229,14 @@ def _in_us_place(text: str, where: Location) -> bool:
     named = _states_named(text)
     if where.city:
         # The right name in the wrong state is another place: "Austin, MN" is not Austin, TX.
-        wrong_state = bool(named) and where.state is not None and where.state not in named
-        return _has_word(text, where.city) and not wrong_state
-    return where.state in named or any(
-        _HUB_STATES[city] == where.state and _has_word(text, city) for city in _HUB_STATES
-    )
+        # A posting that lists several places is in each state it names.
+        return _has_word(text, where.city) and (
+            not named or where.state is None or where.state in named
+        )
+    if named:
+        return where.state in named
+    # Hub cities are for text that gives no state: "Austin / Chicago, IL" is in Illinois.
+    return any(_HUB_STATES[city] == where.state and _has_word(text, city) for city in _HUB_STATES)
 
 
 def _in_foreign_place(text: str, where: Location) -> bool:
@@ -249,6 +253,12 @@ def posting_in_location(location_text: str, work_mode: WorkMode, where: Location
     reader have already applied the US-only scope. Inside the US a remote
     posting is open to everyone; elsewhere even a remote one has to name the
     country, since "Remote" alone says nothing about where.
+
+    A US posting is read for every state it names (full names, and ", XX" codes
+    anywhere in the text) and passes a state search when the state asked for is
+    one of them. Hub cities ("NYC", "Austin") stand in only when no state is
+    named. A city search needs the city as a whole word and, if the text names
+    any state, the state asked for among them.
     """
     if where == Location():
         return True
