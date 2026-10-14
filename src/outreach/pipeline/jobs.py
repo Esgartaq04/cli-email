@@ -162,8 +162,12 @@ def _hn_postings(ctx: RunContext, terms: Sequence[str], filters: RunFilters,
 def _hiring_prospects(ctx: RunContext, terms: Sequence[str], filters: RunFilters,
                       summary: RunSummary, seen: set[str]) -> list[JobProspect]:
     """Companies Hunter says are hiring, other than those already found: a company
-    found both ways keeps the posting it was found by."""
-    if ctx.company_search is None:
+    found both ways keeps the posting it was found by.
+
+    With no search terms there is no hiring search to make: without its
+    `job_openings` filter Hunter would answer with any company in the location.
+    """
+    if ctx.company_search is None or not terms:
         return []
     # `filters.location` is passed as is: its default is the US, whereas
     # None would ask Hunter for companies anywhere.

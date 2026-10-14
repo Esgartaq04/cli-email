@@ -208,6 +208,24 @@ def test_a_company_found_twice_keeps_its_posting():
     assert summary.found == {"board": 1, "hn": 1, "hunter_hiring": 1}
 
 
+def test_no_search_terms_means_no_hiring_search_and_nothing_bought():
+    # An empty expansion must not turn the hiring search into a plain company
+    # search: Hunter would answer with arbitrary companies in the location.
+    search = FakeCompanySearch([FoundCompany("arbitrary.example", "Arbitrary Inc")],
+                               hiring=[FoundCompany("hired.example", "Hired Inc")])
+    people = _finder("arbitrary.example", "hired.example")
+    ctx = _ctx(postings=[GOOD], posts=[SOLO_POST], company_search=search, people=people)
+    ctx.llm.expand_titles = lambda role: []
+    summary = _run(ctx)
+    assert search.queries == []
+    assert summary.found == {"board": 0, "hn": 0, "hunter_hiring": 0}
+    assert ctx.company_info.for_run(summary.run_id) == []
+    assert (people.count_calls, people.search_calls, summary.bought, summary.spent) == ([], [], 0, 0)
+
+    dry = find_job_prospects(ctx, [], RunFilters(), ALL_WORK_MODES, RunSummary(0), dry_run=True)
+    assert dry == [] and search.queries == []
+
+
 def test_a_hunter_error_in_the_hiring_search_does_not_stop_the_run():
     search = FakeCompanySearch(error=HunterAPIError("Hunter discover returned HTTP 429"))
     ctx = _ctx(postings=[GOOD], people=_finder("good.example"), routes={**ROUTES, **HOMEPAGES},
