@@ -449,3 +449,47 @@ exclude_titles = []
 1. The user approves this design.
 2. Create the feature branch off `main` (name it, for example, `feat/contact-finder`), save this document as `docs/superpowers/specs/2026-10-11-contact-finder-design.md`, and commit.
 3. Invoke `superpowers:writing-plans` for the implementation plan. The user picks how it gets executed.
+
+## As built
+
+Decisions taken during implementation and review, recorded here because the execution ledger is deleted after the work lands. Hunter's payload shapes were confirmed from its public API reference (https://hunter.io/api-documentation/v2) and saved as fixtures; no live call was made.
+
+**Decisions the plan made inside the spec's room**
+
+- **People lists are tiers.** Hunter documents `job_titles` on Domain Search, so the department/seniority fallback was not built. A list is `tiers` (each a list of titles, searched with one Domain Search) plus `exclude_titles`. The `departments`, `seniority` and `titles` keys in the config sketch above don't exist. Tier searches also send `type=personal`.
+- **The Email Count pre-check is per domain.** It uses the domain's total personal emails, not counts per department. A department sum would have dropped companies whose partnerships people Hunter files under "sales", and an empty search costs nothing anyway.
+- **No Company Enrichment.** The sector and size check for board and HN companies uses Discover only, so `enrichment_cost` is not a setting. The first call is `organization.domain` alone, which tells which domains Hunter knows; then one call per sector × size combination, with the filters.
+- **Discover carries no sector or size.** Its response has only domain, name and email counts, so every search is one request per sector × size combination and each company carries the exact sector and band it was found under. The `companies` table is not extended; those values live in a per-run table, `run_company_info`. For companies Hunter found, the report shows the requested location as the headquarters ("HQ Texas").
+- **Report file names include the run id** (`2026-10-14-run7-jobs-backend-engineer.html`), so two runs on the same day don't overwrite each other.
+
+**Departures from the text above**
+
+- **Posting locations read every state they name.** `posting_in_location` takes every US state a posting names (each ", XX" code and each full state name), not only a trailing code. A state search passes when the state asked for is among them. Hub cities ("NYC", "Austin") count only when the text names no state. A city search needs the city as a whole word and, when the text names any state, the state asked for among them. So "Austin, TX / New York" passes an Austin, TX search and "Austin, MN" does not. Ambiguous names such as "Kansas City" stay imperfect.
+- **"Sector unknown" on every unknown-fit card.** The report prints it on any card whose fit is unknown, whatever else the card shows. An unknown fit means Hunter doesn't know the domain, so the card has no sector or size anyway.
+- **"No one found" wording.** A company the free count found nobody at reads `Hunter has no one matching "<list>" — cost nothing`. A company whose search came back empty reads `Hunter has no one matching "<list>"` with no cost claim, because its paid results may all have been excluded titles, which were paid for.
+- **The sector and size check treats "known but missing" as a mismatch.** A domain Hunter knows that is absent from the sector- and size-filtered Discover call is left out as "doesn't match your sector or size". Discover's response has no sector or size, so "known but no data" can't be told apart from "known and wrong". The spec's keep-unknown rule holds for domains Hunter doesn't know at all. See the last known gap.
+- **An empty role expansion means nothing found.** If `expand_titles` returns no titles, the Hunter hiring search makes no request: without its `job_openings` filter Hunter would answer with any company in the location. The role is not substituted for the missing titles.
+- **A failed role expansion exits 1.** If the AI call that expands the role fails (an HTTP error, or a reply that isn't a list of titles), `outreach jobs` prints `Expanding the role into job titles failed: …` and exits 1, in a dry run and in a real run. Nothing has been recorded or spent by then.
+- **Dry-run edge cases.**
+  - `--dry-run` with `--resume` exits 2.
+  - A dry run that finds no companies stops after the no-match line and doesn't read the balance.
+  - A Hunter error from the free email counts exits 1 with `Hunter's email count failed: …`.
+- **`.gitignore` anchors `/data/`.** The bare pattern `data/` also ignored `src/outreach/data/`, so the bundled `industries.json` would never have reached git.
+
+**Hunter fields, as confirmed**
+
+- **Account credits.** `GET /v2/account` → `data.requests.credits.{available, used, remaining}`. The tool's balance is `available - used`, which equals `remaining` in the documented example. The counter exists only on unified-credit plans.
+- **Domain Search.** `GET /v2/domain-search` with `domain`, `job_titles` (comma-separated; a `CTO` search matches "Co-founder & CTO" but not "Director"), `type=personal` and `limit` (default 10, maximum 100). Each `data.emails[]` entry has `value`, `first_name`, `last_name`, `position`, `linkedin` and `verification.{status, date}`; the verification field is what lets a recent `valid` stand in for a paid check. The docs list no `linkedin_url` field; the code reads `linkedin` first and falls back to it harmlessly.
+- **Email Count.** `GET /v2/email-count?domain=` → `data.personal_emails`.
+- **Discover.** `POST /v2/discover` with `industry.include`, `headcount`, `headquarters_location.include` (`country`, `state`, `city`), `job_openings.job_title.include` and `organization.domain`; the response is `data[].{domain, organization}`. At most 100 companies come back per call, `offset` is Premium-only, and the limits are 5 requests a second and 50 a minute (the tool doesn't throttle; a call Hunter refuses surfaces as an ordinary `Hunter discover returned HTTP <status>` error).
+- **Fixtures.** `tests/fixtures/hunter_*.json` are the documented examples. The Domain Search one adds two entries in the documented shape and moves the domain to `acme.example`; the Discover one was reconstructed from the documented `organization` example.
+
+**Known gaps**
+
+- **Non-US locations match by country name only.** A posting that says "Toronto" without "Canada" fails a `--location Canada` search.
+- **Discover's free plan returns the same top 100 companies per filter combination.** There is no pagination, so a run can't reach past them; the earlier-list and emailed skips are what move later runs on to new companies.
+- **The Email Count pre-check is per domain, not per title.** A company with people on file but none on the chosen list passes the free check and ends in "No one found" after a search that returned nothing.
+- **Domain Search's cost per email is not stated in Hunter's API reference.** The tool assumes 1 credit per email (`[hunter] email_cost`) and 0.5 per address check (`verify_cost`), from Hunter's help center (2026-08-20). The reference says only that Discover is free; it states no cost for Email Count, Domain Search, Email Verifier or Company Enrichment. Check the account page against the first run's credit line.
+- **The Account credit counter exists only on unified-credit plans.** On any other plan the balance can't be read, the run records a `credits:` error, and nothing is bought.
+- **Discover with `organization` and `industry` or `headcount` together is undocumented.** The docs neither allow nor forbid it, and the jobs run's sector and size check relies on it. One manual Discover call that combines them would settle it.
+- **With a size filter, a company whose headcount Hunter lacks is left out** as not matching, rather than kept as "sector unknown".

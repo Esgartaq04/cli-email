@@ -11,7 +11,7 @@ lever_tokens = []                # <token> in https://jobs.lever.co/<token>
 
 [hn]                             # companies from HN's monthly "Who is hiring?" thread, for `outreach jobs`
 enabled = true                   # false skips the thread
-max_new_companies = 15           # HN companies a run considers, in thread order
+max_new_companies = 15           # most HN companies a run keeps, in thread order; the rest are listed as left out
 llm_fallback_max = 20            # AI calls per run to read posts the rules can't parse
 
 [hunter]                         # what Hunter charges, in credits (steps of 0.1)
@@ -29,10 +29,11 @@ people = "hiring"                # the people list `outreach jobs` uses unless -
 [companies]
 people = "sponsors"              # the people list `outreach companies` uses unless --people names another
 
-# People lists: who to look for at each company. In a list,
-# each tier is one Hunter search by job title, most important first; a run stops once it has enough people
-# (put titles that can name one person, like a "Founder & CTO", in the same tier).
-# exclude_titles drops anyone whose title contains one of its words, in any capitalisation.
+# People lists: who to look for at each company.
+# Each tier is one Hunter search by job title, most important first; a run stops once it has
+# enough people (put titles that can name one person, like a "Founder & CTO", in the same tier).
+# exclude_titles drops anyone whose title contains one of its entries, in any capitalisation
+# ("recruit" also drops "Technical Recruiter"), even though Hunter charged for the address.
 # A list defined here replaces the built-in list of the same name; add your own as [people.<name>].
 
 [people.hiring]

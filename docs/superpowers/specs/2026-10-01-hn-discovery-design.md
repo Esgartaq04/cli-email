@@ -2,6 +2,7 @@
 
 **Date:** 2026-10-01 · **Branch:** `feat/hn-discovery`
 **Status:** Implemented on `feat/hn-discovery` (2026-10-01). See **As built** at the end.
+**Superseded:** by 2026-10-11-contact-finder-design.md, which removes the research half described here.
 **Builds on:** `2026-09-30-startup-stage-targeting-design.md` (Spec A), including its **As built** section.
 
 ## Context
