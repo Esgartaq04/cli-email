@@ -1,4 +1,5 @@
 import contextlib
+import importlib.util
 import re
 import socket
 from datetime import date, datetime
@@ -6,6 +7,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from outreach import cli
@@ -1343,3 +1345,22 @@ def test_the_commands_that_read_the_config_stop_on_a_broken_one(monkeypatch):
 
     assert [r.exit_code for r in results] == [2, 2]
     assert all("config.toml" in r.stderr for r in results)
+
+
+def test_tracebacks_never_show_locals_whatever_typer_defaults_to(monkeypatch):
+    """Some typer releases the project allows (`typer>=0.12`) default `pretty_exceptions_show_locals`
+    to True, and an uncaught traceback would then print `api_key` and `params`. So both apps
+    say False themselves. The module is run again, privately, under such a typer."""
+    class ShowsLocalsByDefault(typer.Typer):
+        def __init__(self, *args, **kwargs):
+            kwargs.setdefault("pretty_exceptions_show_locals", True)
+            super().__init__(*args, **kwargs)
+    monkeypatch.setattr(typer, "Typer", ShowsLocalsByDefault)
+    spec = importlib.util.spec_from_file_location("outreach_cli_under_an_older_typer", cli.__file__)
+    older = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(older)  # only builds the apps: nothing runs, no .env is read
+
+    assert older.app.pretty_exceptions_show_locals is False
+    assert older.emailed_app.pretty_exceptions_show_locals is False
+    assert cli.app.pretty_exceptions_show_locals is False
+    assert cli.emailed_app.pretty_exceptions_show_locals is False

@@ -35,8 +35,12 @@ from outreach.store.runs import (CompanyInfoRepo, FetchAttemptRepo, HNPostRepo, 
                                  RunContactRepo, RunRepo)
 from outreach.types import RunFilters, WorkMode
 
-app = typer.Typer(help="Find the right people to email at the right companies.")
-emailed_app = typer.Typer(help="Keep track of who you've emailed.")
+# An uncaught error must never print its locals: they hold the API keys. Newer typer releases
+# default to False; older ones the project still allows default to True.
+app = typer.Typer(help="Find the right people to email at the right companies.",
+                  pretty_exceptions_show_locals=False)
+emailed_app = typer.Typer(help="Keep track of who you've emailed.",
+                          pretty_exceptions_show_locals=False)
 app.add_typer(emailed_app, name="emailed")
 
 CONFIG_PATH = Path("config.toml")

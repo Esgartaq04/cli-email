@@ -329,7 +329,7 @@ def test_the_warning_names_every_ignored_setting():
 
 def test_the_shipped_config_loads_cleanly():
     cfg = load_config(Path(__file__).resolve().parent.parent / "config.toml")
-    assert cfg.discovery.greenhouse_tokens == ("stripe", "plaid", "brex")
+    # The board tokens are the user's to replace (the README says so), so they are not pinned.
     # It spells out every default, so the commented file and the code can't drift apart.
     assert (cfg.hn, cfg.hunter, cfg.run) == (HNConfig(), HunterConfig(), RunConfig())
     assert cfg.people == DEFAULT_PEOPLE
