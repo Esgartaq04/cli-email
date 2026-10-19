@@ -20,6 +20,23 @@ def test_requests_name_a_current_model():
     assert seen["body"]["model"] == "claude-sonnet-5"
 
 
+def test_expand_titles_keeps_clean_titles_in_order():
+    titles = _llm('["Backend Engineer", "Software Engineer, Backend"]').expand_titles("Backend")
+    assert titles == ["Backend Engineer", "Software Engineer, Backend"]
+
+
+def test_expand_titles_drops_blank_whitespace_and_non_string_items():
+    # A blank would match every posting (`"" in title.lower()`), and a JSON null
+    # must not turn into the title "None".
+    reply = '["Backend Engineer", "", "   ", null, 7, ["Nested"], {"a": 1}, "  Data Engineer  "]'
+    assert _llm(reply).expand_titles("Backend") == ["Backend Engineer", "Data Engineer"]
+
+
+def test_expand_titles_with_nothing_usable_is_empty():
+    assert _llm('["", "  ", null]').expand_titles("Backend") == []
+    assert _llm("[]").expand_titles("Backend") == []
+
+
 def _post_reply(**overrides) -> str:
     reply = {"company": "Acme", "domain": "acme.io", "ats_kind": "lever", "ats_token": "acme",
              "role": "Backend Engineer", "location": "Austin, TX", "work_mode": "remote",

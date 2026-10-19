@@ -115,7 +115,9 @@ class AnthropicLLM:
         result = self._call_json(_EXPAND_SYSTEM, f"Job title: {role_title!r}")
         if not isinstance(result, list):
             raise LLMFormatError(f"expected a JSON array of titles, got: {result!r}")
-        return [str(t) for t in result]
+        # A blank title would match every posting (`"" in title.lower()`), and a JSON
+        # null must not become the title "None": keep only non-blank strings.
+        return [t.strip() for t in result if isinstance(t, str) and t.strip()]
 
     def parse_job_post(self, text: str) -> ParsedPost | None:
         result = self._call_json(_PARSE_SYSTEM, text)
