@@ -44,7 +44,8 @@ real run.
   Hunter changes a price, edit `[hunter]` in `config.toml`.
 - **Always `--dry-run` first.** It prints the most the run can cost and how
   many credits you have, and spends nothing. (On a job run it makes one AI call,
-  which uses your Anthropic key.)
+  which uses your Anthropic key, and its "most" leaves room for the HN companies
+  the AI fallback might add; see [Quick start: a job run](#quick-start-a-job-run).)
 
 ## Install
 
@@ -141,7 +142,7 @@ only the Hunter key.
    ```
 
    ```text
-   Run 1: contacts bought at 4 companies, 11 credits used. Report: reports/2026-10-14-run1-companies-software-development.html
+   Run 1: contacts bought at 4 companies, 11 credits used. Report: reports/2026-10-18-run1-companies-software-development.html
    ```
 
 4. **Open the report** in your browser: `open reports/<file>.html` on macOS,
@@ -156,11 +157,12 @@ only the Hunter key.
    ```
 
    ```text
-   Marked 2 addresses as emailed on 2026-10-14.
+   Marked 2 addresses as emailed on 2026-10-18.
    ```
 
    The next dry run for the same search reports `Skipped: 4 on an earlier list,
-   ...`, and a real run moves on to new companies.
+   ...` and the 39 credits the first run left, and a real run moves on to new
+   companies.
 
 ## Quick start: a job run
 
@@ -182,15 +184,32 @@ Dry run: up to 3 companies would be bought, at most 13.5 credits; 50 left.
 The `HN:` line is the "Who is hiring?" funnel: how many posts were read, how
 many name your role, how many the rules could parse, how many only the AI
 fallback could (a dry run never uses it) and how many survive the cap. The
-`Found:` line counts companies by source. Then the real run, and the same
-follow-up as for a company run:
+`Found:` line counts companies by source.
+
+A dry run can't tell which of the posts that need the fallback a real run would
+keep, so it prices them as if it kept them, and says so. Here two posts need it:
+
+```text
+Filters: Software Development · 51-200 · Texas
+HN: Ask HN: Who is hiring? (October 2026) — 7 posts, 6 match the role, 4 parsed, 2 would need the LLM fallback, 3 kept after the cap.
+Found: 0 from job boards, 3 from HN, 1 from Hunter's hiring search; 0 left out by your filters.
+Skipped: 0 on an earlier list, 0 where you've emailed someone, 1 with no one matching.
+Includes up to 2 more HN companies that the LLM fallback might add in a real run.
+Dry run: up to 5 companies would be bought, at most 22.5 credits; 50 left.
+```
+
+Those extra companies are at most the number of such posts, the fallback's
+`llm_fallback_max`, and the room left under HN's `max_new_companies`, and the
+total never passes `max_companies`. When no post needs the fallback, the
+`Includes` line is left out, as in the first sample. This keeps the "at most"
+a true ceiling. Then the real run, and the same follow-up as for a company run:
 
 ```bash
 outreach jobs --role "Backend Engineer" --sector "Software Development" --size 51-200 --location TX
 ```
 
 ```text
-Run 1: contacts bought at 3 companies, 6.5 credits used. Report: reports/2026-10-14-run1-jobs-backend-engineer.html
+Run 1: contacts bought at 3 companies, 6.5 credits used. Report: reports/2026-10-18-run1-jobs-backend-engineer.html
 ```
 
 `--sector`, `--size` and `--location` are all optional on a job run. Without
@@ -199,9 +218,10 @@ them it looks for the role anywhere in the US and makes no sector or size check.
 ## Commands
 
 Every command prints its own help with `--help`. Exit status is 0 on success,
-1 when a run or lookup fails (Hunter refused a search, a run id doesn't exist,
-nothing was removed) and 2 for a bad argument or a missing key. Arguments are
-all checked before any key is read or any network call is made.
+1 when a run or lookup fails (Hunter refused a search or couldn't be reached,
+the credit balance couldn't be read, a run id doesn't exist, nothing was
+removed) and 2 for a bad argument or a missing key. Arguments are all checked
+before any key is read or any network call is made.
 
 ### `outreach jobs`
 
@@ -243,7 +263,9 @@ A company found twice is merged and keeps its posting.
   kept, the first `max_new_companies` (15) in thread order, and the rest are
   listed as left out. Posts the rules can't read go to the AI, at most
   `llm_fallback_max` (20) per run, and its answer is kept only if every field
-  appears in the post itself.
+  appears in the post itself. A dry run doesn't call the AI: it counts those
+  posts and prices them as companies a real run might add (see [Quick start: a
+  job run](#quick-start-a-job-run)).
 - `--resume` buys at the companies an earlier run already found, without
   searching again. The role, filters and people list stored with that run are
   used, and any other flag is ignored. A resume still needs the same keys. It
@@ -251,6 +273,9 @@ A company found twice is merged and keeps its posting.
 - Two warnings can print: `OUTREACH_CONTACT_EMAIL` is not set, and no board
   tokens with HN discovery off (then companies can come only from Hunter's
   hiring search).
+- If the AI call that expands your role fails, the command prints `Expanding
+  the role into job titles failed: ...` and exits 1, before anything is spent.
+  Any other end-of-run line is the same as for a company run, below.
 
 ### `outreach companies`
 
@@ -275,11 +300,25 @@ needs only `HUNTER_API_KEY`.
 If Hunter finds nothing, the command says `No company matched these filters.
 Try another sector ("outreach sectors <word>") or a wider size or location.`
 
-The lines a run prints:
+The lines a run prints (the same for `outreach jobs`):
 
 - `Run N: contacts bought at X companies, Y credits used. Report: <path>`
 - `N companies were not bought because credits ran out.` (see
   [How buying works](#how-buying-works))
+- On stderr, only when something went wrong, after the report is written:
+  - `The credit balance could not be checked, so nothing was bought: <why>`,
+    with exit status 1. The report lists the companies that would have been
+    bought as failed, with the same reason.
+  - `Warning: N error(s) during this run; the report's run details list them.`,
+    with exit status 0. A search or a source failed for some companies and the
+    rest went ahead.
+
+A dry run that can't read the balance still prints the worst case, on stderr
+and with exit status 1: `Dry run: up to 5 companies would be bought, at most
+22.5 credits, but the credit balance could not be checked: <why>`. If Hunter
+can't be reached at all, a command stops with exit status 1 and a line such as
+`Hunter's company search failed: Hunter discover could not be reached
+(ConnectError)`. A message about Hunter never contains your key.
 
 ### `outreach sectors`
 
@@ -301,14 +340,14 @@ outreach emailed remove ADDRESS...
 ```
 
 - `add` marks addresses as emailed, today or on the day given with `--on`
-  (`Marked 2 addresses as emailed on 2026-10-14.`). Any address works,
+  (`Marked 2 addresses as emailed on 2026-10-18.`). Any address works,
   including one the tool never found. Case and surrounding spaces don't matter.
 - `list` shows who is marked, newest first: the date, the address and, when the
   tool knows them, the name, title and company.
 
   ```text
-  2026-10-14  casey@marlow-robotics.example  Casey Mockup · Events Manager · Marlow Robotics
-  2026-10-14  jamie@kestrel-analytics.example  Jamie Sample · Head of Partnerships · Kestrel Analytics
+  2026-10-18  casey@marlow-robotics.example  Casey Mockup · Events Manager · Marlow Robotics
+  2026-10-18  jamie@kestrel-analytics.example  Jamie Sample · Head of Partnerships · Kestrel Analytics
   ```
 
 - `remove` takes addresses off the list (`Removed 1.`). It names any address
@@ -438,8 +477,7 @@ tiers = [
 ```
 
 **Adding your own.** Add a `[people.<name>]` section to `config.toml` with
-`tiers` (required) and optionally `exclude_titles`, then pick it per run with
-`--people <name>` or make it a command's default:
+`tiers` (required) and optionally `exclude_titles`:
 
 ```toml
 [people.speakers]
@@ -447,9 +485,16 @@ tiers = [
     ["developer relations", "community", "events"],
     ["engineering manager", "cto"],
 ]
+```
 
-[companies]
-people = "speakers"
+Then pick it per run with `--people speakers`, or make it a command's default.
+`config.toml` already has a `[companies]` section and a `[jobs]` section, and a
+second one with the same name makes the commands stop with exit status 2 (`not
+valid TOML: Cannot declare ('companies',) twice`), so don't add a new header.
+Change the `people` line that is already there:
+
+```toml
+people = "speakers"              # in the existing [companies] section (or [jobs])
 ```
 
 A list in `config.toml` replaces the built-in list of the same name entirely;
@@ -506,18 +551,20 @@ as left out ("not bought — out of credits"), nothing more is bought, and the
 run ends with `N companies were not bought because credits ran out.` When your
 credits renew, `outreach companies --resume RUN_ID` (or `outreach jobs
 --resume RUN_ID`) finishes the run. If the balance can't be read at all,
-nothing is bought and the report says why: Hunter reports the balance only on
-plans with unified credits.
+nothing is bought, the report says why and the command prints `The credit
+balance could not be checked, so nothing was bought: <why>` and exits 1. Hunter
+reports the balance only on plans with unified credits, so check your plan on
+your Hunter dashboard.
 
 ## Reading the report
 
 Each run writes one self-contained HTML file to `reports/`, named like
-`2026-10-14-run1-companies-software-development.html` (date, run number, kind
+`2026-10-18-run1-companies-software-development.html` (date, run number, kind
 and what the run was for).
 
 **Header.** The kind of run ("Company run", or the role followed by "job run"),
 your filters as read, the people list, the run number and date, and the
-credits: `10 credits used · 40 left`.
+credits: `11 credits used · 39 left`.
 
 **Sections, in order:**
 
@@ -591,7 +638,9 @@ a single warning rather than failing:
 There are exactly two AI calls, both in job runs. Company runs make none.
 
 - `expand_titles`: turns your role into similar job titles to search for. One
-  call per job run, including a dry run.
+  call per job run, including a dry run. Only non-empty text titles are kept;
+  if none are left, no board, HN or Hunter hiring search finds anything, since
+  an empty title would match every posting.
 - `parse_job_post`: reads an HN post the rules couldn't parse, at most
   `llm_fallback_max` per run and never in a dry run. Every field it returns
   must appear in the post itself, or the post is dropped.

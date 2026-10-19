@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-11 · **Builds on:** Spec A (`2026-09-30-startup-stage-targeting-design.md`) and Spec B (`2026-10-01-hn-discovery-design.md`), including both "As built" sections
 **Replaces:** the research half of V1 and Spec A (quotes, evidence gate, findings, startup stages, hooks), and Spec B's stage-based pre-rank
-**Status:** Approved 2026-10-11 on branch `feat/contact-finder`. Implementation plan next (`superpowers:writing-plans`).
+**Status:** Implemented on `feat/contact-finder` (2026-10-18). See **As built** at the end for where the code departs from the text below.
 
 ## Context: what this is for and why now
 
@@ -474,6 +474,11 @@ Decisions taken during implementation and review, recorded here because the exec
   - `--dry-run` with `--resume` exits 2.
   - A dry run that finds no companies stops after the no-match line and doesn't read the balance.
   - A Hunter error from the free email counts exits 1 with `Hunter's email count failed: …`.
+- **The jobs dry run's ceiling leaves room for the LLM fallback.** The Dry run section above has HN read by rules only, and also lists "a dry run that understates the cost" as an anti-goal. A real run can keep more HN companies through the fallback than the rules alone find, so the rules-only ceiling could be too low. The decision keeps the dry run LLM-free and widens the ceiling instead. The dry run adds `min(hn_needs_llm, [hn] llm_fallback_max, max(0, [hn] max_new_companies − hn_kept))` companies to the ones it would buy, prices `min([run] max_companies, would-buy + that)` companies, and prints `Includes up to N more HN companies that the LLM fallback might add in a real run.` just before the `Dry run:` line. N is how far the ceiling rose, so the run's cap can make it smaller than the sum, and the line is left out when nothing is added. The `Dry run:` line keeps its format. The companies dry run is unchanged.
+- **Failures of a run are said out loud.** A Hunter request that can't be made (offline, DNS failure, timeout) raises `HunterAPIError` naming only the endpoint and the kind of failure, never the URL, so every existing handler covers it. A real run whose summary holds a `credits: …` error (the balance couldn't be read, so nothing was bought) prints `The credit balance could not be checked, so nothing was bought: …` on stderr, after the report is written, and exits 1. Any other errors in the summary print `Warning: N error(s) during this run; the report's run details list them.` and exit 0. `expand_titles` keeps only non-blank text titles (stripped), because a blank term matches every posting; with none left, nothing is found.
+- **The report labels every non-HN posting "via job board".** The spec says "or the board". A posting found by a board adapter is labelled with the kind of source, not the board's name.
+- **`outreach report <old run>` prints no file path.** For a run made before the report was rebuildable, it says `see its saved HTML report` and exits 1. Old report file names can't be rebuilt reliably, so the command doesn't guess a path.
+- **Task 1 kept two fixtures the plan listed for deletion.** `tests/fixtures/careers_page.html` and `eng_blog_post.html` stay, because the moved `html_to_text` tests (`tests/sources/test_htmltext.py`) read them.
 - **`.gitignore` anchors `/data/`.** The bare pattern `data/` also ignored `src/outreach/data/`, so the bundled `industries.json` would never have reached git.
 
 **Hunter fields, as confirmed**
@@ -490,6 +495,6 @@ Decisions taken during implementation and review, recorded here because the exec
 - **Discover's free plan returns the same top 100 companies per filter combination.** There is no pagination, so a run can't reach past them; the earlier-list and emailed skips are what move later runs on to new companies.
 - **The Email Count pre-check is per domain, not per title.** A company with people on file but none on the chosen list passes the free check and ends in "No one found" after a search that returned nothing.
 - **Domain Search's cost per email is not stated in Hunter's API reference.** The tool assumes 1 credit per email (`[hunter] email_cost`) and 0.5 per address check (`verify_cost`), from Hunter's help center (2026-08-20). The reference says only that Discover is free; it states no cost for Email Count, Domain Search, Email Verifier or Company Enrichment. Check the account page against the first run's credit line.
-- **The Account credit counter exists only on unified-credit plans.** On any other plan the balance can't be read, the run records a `credits:` error, and nothing is bought.
+- **The Account credit counter exists only on unified-credit plans.** On any other plan the balance can't be read, the run records a `credits:` error, nothing is bought, and a real run exits 1 (a dry run prints its estimate and exits 1).
 - **Discover with `organization` and `industry` or `headcount` together is undocumented.** The docs neither allow nor forbid it, and the jobs run's sector and size check relies on it. One manual Discover call that combines them would settle it.
 - **With a size filter, a company whose headcount Hunter lacks is left out** as not matching, rather than kept as "sector unknown".

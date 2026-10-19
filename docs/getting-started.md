@@ -152,12 +152,12 @@ outreach companies --sector "Marketing Services" --location TX
 ```
 
 ```text
-Run 1: contacts bought at 3 companies, 10 credits used. Report: reports/2026-10-14-run1-companies-marketing-services.html
+Run 1: contacts bought at 3 companies, 10 credits used. Report: reports/2026-10-18-run1-companies-marketing-services.html
 ```
 
 It used 10 credits, less than the worst case of 13.5 the dry run showed, because
-Hunter had already confirmed some addresses. The report is a web page saved in
-the `reports` folder.
+Hunter had already confirmed some addresses. That leaves 40 of the 50 credits
+the dry run showed. The report is a web page saved in the `reports` folder.
 
 ## 8. Open the report and reach out
 
@@ -184,22 +184,23 @@ outreach emailed add jamie@kestrel-analytics.example
 ```
 
 ```text
-Marked 1 address as emailed on 2026-10-14.
+Marked 1 address as emailed on 2026-10-18.
 ```
 
 List all the addresses you've marked with `outreach emailed list`:
 
 ```text
-2026-10-14  jamie@kestrel-analytics.example  Jamie Sample · Head of Partnerships · Kestrel Analytics
+2026-10-18  jamie@kestrel-analytics.example  Jamie Sample · Head of Partnerships · Kestrel Analytics
 ```
 
 If you marked one by mistake, `outreach emailed remove <address>` takes it off.
 Run the dry run again and you'll see the effect: the companies you've already
-had are skipped, so the next real run moves on to new ones.
+had are skipped, so the next real run moves on to new ones. It also shows the
+credits the first run left you:
 
 ```text
 Skipped: 3 on an earlier list, 0 where you've emailed someone, 1 with no one matching.
-Dry run: up to 2 companies would be bought, at most 9 credits; 50 left.
+Dry run: up to 2 companies would be bought, at most 9 credits; 40 left.
 ```
 
 ## 9. What 50 credits buy
@@ -225,6 +226,8 @@ Dry run: up to 2 companies would be bought, at most 9 credits; 50 left.
 | `config file not found: config.toml` | You aren't in the project folder. `cd` into it and run the command again. |
 | `HUNTER_API_KEY is not set. Add it to .env ...` | The `.env` file is missing, is in the wrong folder, or the key line is empty. It must be called `.env` and sit next to `config.toml`. |
 | `Hunter's company search failed: Hunter discover returned HTTP 401` | Hunter didn't accept the key. Copy it again from <https://hunter.io/api-keys>. |
+| `Hunter's company search failed: Hunter discover could not be reached (ConnectError)` | The computer couldn't reach Hunter: you're offline, a network or DNS problem, or Hunter didn't answer in time (`ReadTimeout`). Check your connection and run the command again. Nothing was bought. |
+| `The credit balance could not be checked, so nothing was bought: ...` on a real run, or `Dry run: ... but the credit balance could not be checked: ...` on a dry run | The words after the colon say why. `Hunter account response has no credit balance` means your Hunter account doesn't report a unified credit counter, which the tool needs to know what it can spend: check your plan and credits on your Hunter dashboard. `... returned HTTP 401` means Hunter didn't accept the key. Either way, nothing was bought, but a real run still wrote its report, listing why each company wasn't bought. |
 | `... returned HTTP 429` | Your Hunter plan's monthly limit is used up. Wait for it to renew. |
 | `... returned HTTP 403` | Hunter refused the call, usually because it was too many in a short time. Wait a minute and try again. |
 | `Unknown sector "..."` | Use a name from `outreach sectors <word>`, copied exactly. |
