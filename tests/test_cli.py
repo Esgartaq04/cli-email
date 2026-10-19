@@ -46,6 +46,9 @@ NO_CONTACT_EMAIL = ("Warning: OUTREACH_CONTACT_EMAIL is not set -- requests will
                     "tool but name no one to contact about them.")
 NO_TOKENS_NO_HN = ("Warning: no board tokens in config.toml and HN discovery is off -- companies "
                    "can only come from Hunter's hiring search.")
+NO_BALANCE = ("The credit balance could not be checked, so nothing was bought: "
+              "Hunter account returned HTTP 401")
+RUN_ERRORS_WARNING = "Warning: 1 error(s) during this run; the report's run details list them."
 # The recorded "Who is hiring?" thread, read for the role "Backend Engineer" in the US.
 HN_FUNNEL = ("HN: Ask HN: Who is hiring? (September 2026) — 11 posts, 8 match the role, "
              "5 parsed, 3 would need the LLM fallback, 4 kept after the cap.")
@@ -514,6 +517,7 @@ def test_companies_run_writes_a_report(monkeypatch, tmp_path):
     assert result.stdout.splitlines()[0].startswith(
         "Run 1: contacts bought at 2 companies, 2 credits used. Report: ")
     assert "ran out" not in result.stdout and NO_MATCH not in result.stdout
+    assert result.stderr == ""  # a run with nothing wrong says nothing about errors
     path = _report_path(result.stdout)
     assert path.exists() and path.parent == Path("reports")
     assert [p.name for p in (tmp_path / "reports").iterdir()] == [path.name]
@@ -531,6 +535,50 @@ def test_companies_run_says_when_credits_ran_out(monkeypatch):
     lines = result.stdout.splitlines()
     assert lines[0].startswith("Run 1: contacts bought at 0 companies, 0 credits used. Report: ")
     assert lines[1:] == ["2 companies were not bought because credits ran out."]
+
+
+def _balance_unreadable(monkeypatch):
+    def unreadable(self):
+        raise HunterAPIError("Hunter account returned HTTP 401")
+    monkeypatch.setattr(FakePeopleFinder, "balance_tenths", unreadable)
+
+
+def _count_fails_for(monkeypatch, domain):
+    """Hunter refuses the free email count for one company; the others are counted as 3."""
+    def count_people(self, asked):
+        if asked == domain:
+            raise HunterAPIError("Hunter email-count returned HTTP 429")
+        return 3
+    monkeypatch.setattr(FakePeopleFinder, "count_people", count_people)
+
+
+def test_companies_run_with_an_unreadable_balance_exits_1(monkeypatch):
+    _fakes(monkeypatch)
+    _hunter_finds(monkeypatch, "a", "b")
+    _balance_unreadable(monkeypatch)
+
+    result = runner.invoke(app, ["companies", "--sector", "Software Development"])
+
+    assert result.exit_code == 1
+    assert result.stdout.splitlines()[0].startswith(
+        "Run 1: contacts bought at 0 companies, 0 credits used. Report: ")
+    assert result.stderr.splitlines() == [NO_BALANCE]
+    assert _report_path(result.stdout).exists()  # the report is written before the run ends in an error
+
+
+def test_companies_run_with_a_failing_company_warns_and_exits_0(monkeypatch):
+    _fakes(monkeypatch)
+    _hunter_finds(monkeypatch, "a", "b")
+    _someone_to_buy(monkeypatch, SPONSORS_FIRST_TIER)
+    _count_fails_for(monkeypatch, "a.example")
+
+    result = runner.invoke(app, ["companies", "--sector", "Software Development"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.splitlines()[0].startswith(
+        "Run 1: contacts bought at 1 companies, 1 credits used. Report: ")
+    assert result.stderr.splitlines() == [RUN_ERRORS_WARNING]
+    assert _report_path(result.stdout).exists()
 
 
 def test_companies_uses_the_configured_people_list_unless_told_otherwise(monkeypatch):
@@ -933,6 +981,37 @@ def test_jobs_says_when_credits_ran_out(monkeypatch):
     lines = result.stdout.splitlines()
     assert lines[0].startswith("Run 1: contacts bought at 0 companies, 0 credits used. Report: ")
     assert lines[1:] == ["2 companies were not bought because credits ran out."]
+
+
+def test_jobs_run_with_an_unreadable_balance_exits_1(monkeypatch):
+    _fakes(monkeypatch)
+    monkeypatch.setenv("OUTREACH_CONTACT_EMAIL", "me@example.com")  # so stderr has one line only
+    _hunter_finds(monkeypatch, "a", "b")
+    _balance_unreadable(monkeypatch)
+
+    result = runner.invoke(app, ["jobs", "--role", "Backend Engineer"])
+
+    assert result.exit_code == 1
+    assert result.stdout.splitlines()[0].startswith(
+        "Run 1: contacts bought at 0 companies, 0 credits used. Report: ")
+    assert result.stderr.splitlines() == [NO_BALANCE]
+    assert _report_path(result.stdout).exists()
+
+
+def test_jobs_run_with_a_failing_company_warns_and_exits_0(monkeypatch):
+    _fakes(monkeypatch)
+    monkeypatch.setenv("OUTREACH_CONTACT_EMAIL", "me@example.com")  # so stderr has one line only
+    _hunter_finds(monkeypatch, "a", "b")
+    _someone_to_buy(monkeypatch, HIRING_FIRST_TIER)
+    _count_fails_for(monkeypatch, "a.example")
+
+    result = runner.invoke(app, ["jobs", "--role", "Backend Engineer"])
+
+    assert result.exit_code == 0, result.output
+    # The company's failure, and the fake HN source having no thread to read.
+    assert result.stderr.splitlines() == [RUN_ERRORS_WARNING.replace("1 error(s)", "2 error(s)")]
+    html = _report_path(result.stdout).read_text(encoding="utf-8")
+    assert "Hunter email-count returned HTTP 429" in html  # the report's run details list it
 
 
 def test_jobs_uses_the_configured_people_list_unless_told_otherwise(monkeypatch):

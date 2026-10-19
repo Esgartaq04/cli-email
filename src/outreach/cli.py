@@ -198,6 +198,23 @@ def _print_run(summary: RunSummary, report: Path) -> None:
         typer.echo(f"{summary.out_of_credits} companies were not bought because credits ran out.")
 
 
+_CREDITS_ERROR = "credits: "  # how the run's own summary records an unreadable balance
+
+
+def _end_run(summary: RunSummary) -> None:
+    """What a finished run says last, once its report is written: whether it went wrong.
+
+    A run that could not read the balance bought nothing, which is a failure, not a quiet
+    success; any other error was survived company by company and is a warning."""
+    for error in summary.errors:
+        if error.startswith(_CREDITS_ERROR):
+            _fail("The credit balance could not be checked, so nothing was bought: "
+                  f"{error[len(_CREDITS_ERROR):]}", 1)
+    if summary.errors:
+        typer.echo(f"Warning: {len(summary.errors)} error(s) during this run; the report's "
+                   "run details list them.", err=True)
+
+
 # --- companies -----------------------------------------------------------------------
 
 @app.command()
@@ -247,6 +264,7 @@ def companies(
     # A resume runs no search, so it has nothing to say about what Hunter found.
     if resume is None and summary.found.get("hunter", 0) == 0:
         typer.echo(_NO_COMPANY_MATCHED)
+    _end_run(summary)
 
 
 def _company_search_failed(exc: HunterAPIError) -> NoReturn:
@@ -334,6 +352,7 @@ def jobs(
     # A resume runs no search, so it has nothing to say about what was found.
     if resume is None and not any(_found_counts(summary)):
         typer.echo(_NO_JOB_MATCHED)
+    _end_run(summary)
 
 
 # What expanding the role can raise: the request failed or was refused, or the reply isn't titles.
