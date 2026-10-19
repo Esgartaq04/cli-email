@@ -15,7 +15,8 @@ from outreach.contacts.fake import FakePeopleFinder
 from outreach.contacts.hunter import HunterAPIError
 from outreach.llm.anthropic_client import LLMFormatError
 from outreach.llm.fake import FakeLLM
-from outreach.sources.companies import CompanyQuery, FakeCompanySearch, FoundCompany
+from outreach.sources.companies import (CompanyQuery, FakeCompanySearch, FoundCompany,
+                                        HunterCompanySearch)
 from outreach.sources.hn import FakeHNSource
 from outreach.sources.jobboards.fake import FakeJobBoardSource
 from outreach.store.db import connect
@@ -480,6 +481,24 @@ def test_a_hunter_search_failure_exits_1(monkeypatch, extra):
     assert result.exit_code == 1
     assert result.stderr.strip() == "Hunter's company search failed: Hunter discover returned HTTP 429"
     assert _count("runs") == 0  # the search comes before the run is recorded
+
+
+def test_a_dry_run_with_hunter_unreachable_exits_1_without_a_traceback(monkeypatch):
+    """Offline, or a DNS failure or a timeout, reaches the user as a message, not a traceback."""
+    _fakes(monkeypatch)
+
+    def offline(request):
+        raise httpx.ConnectError(f"cannot reach {request.url}", request=request)
+    hunter = HunterCompanySearch("sk-secret", client=httpx.Client(transport=httpx.MockTransport(offline)))
+    monkeypatch.setattr(FakeCompanySearch, "search", lambda self, query: hunter.search(query))
+
+    result = runner.invoke(app, ["companies", "--sector", "Software Development", "--dry-run"])
+
+    assert result.exit_code == 1
+    assert result.stderr.strip() == (
+        "Hunter's company search failed: Hunter discover could not be reached (ConnectError)")
+    assert "sk-secret" not in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)  # no traceback
 
 
 # --- companies: real run -----------------------------------------------------------

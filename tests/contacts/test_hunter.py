@@ -112,16 +112,23 @@ def test_linkedin_handle_is_expanded_and_foreign_hosts_rejected(value, expected)
 SECRET = "sk-hunter-SECRET-key"
 
 
-@pytest.mark.parametrize("call", [
-    lambda c: HunterProvider(SECRET, client=c).verify("m@acme.com"),
-    lambda c: HunterProvider(SECRET, client=c).count_people("acme.com"),
-    lambda c: HunterProvider(SECRET, client=c).search_people("acme.com", ["cto"], 3),
-    lambda c: HunterProvider(SECRET, client=c).balance_tenths(),
-    lambda c: HunterCompanySearch(SECRET, client=c).search(CompanyQuery(("Banking",))),
-    lambda c: HunterCompanySearch(SECRET, client=c).check(["acme.com"], CompanyQuery(("Banking",))),
-    lambda c: hunter_post(c, "discover", SECRET, {"headcount": ["1-10"]}),
-], ids=["verify", "count_people", "search_people", "balance_tenths", "company_search", "company_check",
-        "hunter_post"])
+# Every Hunter call the pipeline makes: (call, the endpoint path it uses). The first four
+# go through `hunter_get`, the rest through `hunter_post`.
+_HUNTER_CALLS = [
+    (lambda c: HunterProvider(SECRET, client=c).verify("m@acme.com"), "email-verifier"),
+    (lambda c: HunterProvider(SECRET, client=c).count_people("acme.com"), "email-count"),
+    (lambda c: HunterProvider(SECRET, client=c).search_people("acme.com", ["cto"], 3), "domain-search"),
+    (lambda c: HunterProvider(SECRET, client=c).balance_tenths(), "account"),
+    (lambda c: HunterCompanySearch(SECRET, client=c).search(CompanyQuery(("Banking",))), "discover"),
+    (lambda c: HunterCompanySearch(SECRET, client=c).check(["acme.com"], CompanyQuery(("Banking",))),
+     "discover"),
+    (lambda c: hunter_post(c, "discover", SECRET, {"headcount": ["1-10"]}), "discover"),
+]
+_HUNTER_CALL_IDS = ["verify", "count_people", "search_people", "balance_tenths", "company_search",
+                    "company_check", "hunter_post"]
+
+
+@pytest.mark.parametrize("call", [call for call, _ in _HUNTER_CALLS], ids=_HUNTER_CALL_IDS)
 def test_http_errors_never_carry_the_api_key(call):
     """The key rides in the query string, and httpx's own HTTPStatusError
     message embeds the full URL. The pipeline persists exception text, so the
@@ -132,6 +139,24 @@ def test_http_errors_never_carry_the_api_key(call):
     assert SECRET not in str(exc) and SECRET not in repr(exc)
     assert "api_key" not in str(exc) and "?" not in str(exc)
     assert "HTTP 500" in str(exc)
+    assert exc.__cause__ is None and exc.__context__ is None
+
+
+@pytest.mark.parametrize("failure", [httpx.ConnectError, httpx.ReadTimeout])
+@pytest.mark.parametrize(("call", "path"), _HUNTER_CALLS, ids=_HUNTER_CALL_IDS)
+def test_unreachable_hunter_is_a_hunter_error_that_never_carries_the_api_key(call, path, failure):
+    """Offline, a DNS failure or a timeout raises an httpx error whose text and repr carry the
+    request URL, and so the key. It must reach the caller as a `HunterAPIError` naming only
+    the endpoint and the kind of failure, with the original error attached nowhere."""
+    def unreachable(request: httpx.Request) -> httpx.Response:
+        raise failure(f"cannot reach {request.url}", request=request)
+
+    with pytest.raises(HunterAPIError) as caught:
+        call(_client(unreachable))
+    exc = caught.value
+    assert str(exc) == f"Hunter {path} could not be reached ({failure.__name__})"
+    assert SECRET not in str(exc) and SECRET not in repr(exc)
+    assert "api_key" not in str(exc) and "?" not in str(exc) and "?" not in repr(exc)
     assert exc.__cause__ is None and exc.__context__ is None
 
 

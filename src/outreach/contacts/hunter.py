@@ -53,13 +53,14 @@ def _safe_linkedin_url(value: object) -> str | None:
 
 
 class HunterAPIError(Exception):
-    """A Hunter request answered with a non-2xx status.
+    """A Hunter request answered with a non-2xx status, or could not be made at all.
 
     Hunter authenticates with `api_key` in the query string, and httpx's own
-    `HTTPStatusError` message embeds the full request URL -- key included. The
-    pipeline writes exception text to the database and the HTML report, so the
-    original error must never escape. This one names only the endpoint path and
-    the status.
+    `HTTPStatusError` message -- like the text and repr of its transport errors
+    (offline, DNS failure, timeout) -- embeds the full request URL, key
+    included. The pipeline writes exception text to the database and the HTML
+    report, so the original error must never escape. This one names only the
+    endpoint path and the status, or the kind of failure.
     """
 
 
@@ -68,10 +69,16 @@ def hunter_get(client: httpx.Client, path: str, api_key: str, *,
     """GET one Hunter endpoint and return its JSON object.
 
     `missing_ok` turns HTTP 404 into `None` for endpoints where "no such
-    company/person" is an answer rather than a failure. Any other non-2xx
-    raises `HunterAPIError`.
+    company/person" is an answer rather than a failure. Any other non-2xx, and
+    a request that cannot be made, raises `HunterAPIError`.
     """
-    response = client.get(f"{_BASE_URL}/{path}", params={**params, "api_key": api_key})
+    failure = None
+    try:
+        response = client.get(f"{_BASE_URL}/{path}", params={**params, "api_key": api_key})
+    except httpx.TransportError as exc:
+        failure = type(exc).__name__
+    if failure is not None:
+        raise _unreachable(path, failure)
     if missing_ok and response.status_code == 404:
         return None
     return _json_object(response, path)
@@ -81,10 +88,24 @@ def hunter_post(client: httpx.Client, path: str, api_key: str, body: dict) -> di
     """POST `body` as JSON to one Hunter endpoint and return its JSON object.
 
     The key goes in the query string, as for `hunter_get`; the body carries
-    only the request. Any non-2xx raises `HunterAPIError`.
+    only the request. Any non-2xx, and a request that cannot be made, raises
+    `HunterAPIError`.
     """
-    response = client.post(f"{_BASE_URL}/{path}", params={"api_key": api_key}, json=body)
+    failure = None
+    try:
+        response = client.post(f"{_BASE_URL}/{path}", params={"api_key": api_key}, json=body)
+    except httpx.TransportError as exc:
+        failure = type(exc).__name__
+    if failure is not None:
+        raise _unreachable(path, failure)
     return _json_object(response, path)
+
+
+def _unreachable(path: str, failure: str) -> HunterAPIError:
+    # Built and raised outside the `except` block, from the type name alone: raising inside
+    # it would keep the httpx error as `__context__` (even under `from None`), and its text
+    # and repr carry the request URL, so the key.
+    return HunterAPIError(f"Hunter {path} could not be reached ({failure})")
 
 
 def _json_object(response: httpx.Response, path: str) -> dict:
