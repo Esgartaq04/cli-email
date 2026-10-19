@@ -164,8 +164,13 @@ def _people_list(config: Config, name: str) -> PeopleList:
     return people
 
 
-def _print_dry_run_cost(ctx: RunContext, people: PeopleList, domains: Sequence[str]) -> None:
-    """The last two lines of a dry run: who would be skipped, then the most the rest can cost."""
+def _print_dry_run_cost(ctx: RunContext, people: PeopleList, domains: Sequence[str],
+                        might_add: int = 0) -> None:
+    """The last lines of a dry run: who would be skipped, then the most the rest can cost.
+
+    `might_add` is how many more companies a real run could find than the ones in `domains`
+    (a job run's HN posts that only the LLM fallback can read); they are priced as if each
+    would be bought, up to the run's cap, so that "at most" stays true."""
     try:
         preview = preview_contacts(ctx, people, domains)
     except HunterAPIError as exc:
@@ -174,8 +179,12 @@ def _print_dry_run_cost(ctx: RunContext, people: PeopleList, domains: Sequence[s
         _fail(f"Hunter's email count failed: {exc}", 1)
     typer.echo(f"Skipped: {preview.earlier_list} on an earlier list, {preview.emailed} where "
                f"you've emailed someone, {preview.no_one} with no one matching.")
-    estimate = (f"Dry run: up to {preview.to_buy} companies would be bought, "
-                f"at most {format_credits(max_cost(ctx, preview.to_buy))} credits")
+    companies = min(ctx.config.run.max_companies, preview.to_buy + might_add)
+    if companies > preview.to_buy:
+        typer.echo(f"Includes up to {companies - preview.to_buy} more HN companies that the LLM "
+                   "fallback might add in a real run.")
+    estimate = (f"Dry run: up to {companies} companies would be bought, "
+                f"at most {format_credits(max_cost(ctx, companies))} credits")
     try:
         balance = ctx.people.balance_tenths()
     except Exception as exc:
@@ -390,7 +399,8 @@ def _jobs_dry_run(ctx: RunContext, role: str, filters: RunFilters,
     """Everything a run would decide before spending a credit, and nothing it would store.
 
     Expanding the role is the one paid call, as in a run. Reading HN's posts needs no
-    LLM here: the posts only the fallback could read are counted instead."""
+    LLM here: the posts only the fallback could read are counted instead, and priced as
+    companies a real run might add."""
     typer.echo(f"Filters: {describe_filters(filters)}")
     try:
         terms = ctx.llm.expand_titles(role)
@@ -414,7 +424,12 @@ def _jobs_dry_run(ctx: RunContext, role: str, filters: RunFilters,
     if not kept:
         typer.echo(_NO_JOB_MATCHED)
         return
-    _print_dry_run_cost(ctx, people, kept)
+    # The posts only the LLM fallback can read are not priced above, yet a real run may keep
+    # companies from them, within the fallback's budget and HN's cap.
+    hn = ctx.config.hn
+    might_add = min(summary.hn_needs_llm, hn.llm_fallback_max,
+                    max(0, hn.max_new_companies - summary.hn_kept))
+    _print_dry_run_cost(ctx, people, kept, might_add)
 
 
 # --- sectors -------------------------------------------------------------------------

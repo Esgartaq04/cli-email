@@ -806,6 +806,59 @@ def test_jobs_dry_run_reports_the_hn_funnel_without_llm_calls(monkeypatch):
     assert asked == []
 
 
+INCLUDES = "Includes up to {} more HN companies that the LLM fallback might add in a real run."
+
+
+@pytest.mark.parametrize("settings, added, companies, credits", [
+    # The recorded thread: 4 companies kept for free, 3 more posts only the fallback could read.
+    ("", 3, 7, "31.5"),
+    ("[hn]\nllm_fallback_max = 2\n", 2, 6, "27"),         # the fallback reads at most 2 posts
+    ("[hn]\nmax_new_companies = 5\n", 1, 5, "22.5"),      # HN may keep one more company
+    ("[hn]\nmax_new_companies = 4\n", None, 4, "18"),     # HN is full: the fallback adds none
+    ("[run]\nmax_companies = 5\n", 1, 5, "22.5"),         # a run buys at 5 at most, 4 are priced
+    ("[run]\nmax_companies = 4\n", None, 4, "18"),        # already at the run's cap
+], ids=["defaults", "fallback_limit", "hn_headroom", "hn_full", "run_cap_clamps", "run_cap_reached"])
+def test_jobs_dry_run_prices_what_the_llm_fallback_might_add(
+        monkeypatch, settings, added, companies, credits):
+    """The dry run reads HN without the LLM, but a real run may keep more HN companies through
+    it, so "at most" has to leave room for them -- within the fallback, HN and run limits."""
+    _fakes(monkeypatch)
+    Path("config.toml").write_text(_TEST_CONFIG + "\n" + settings, encoding="utf-8")
+    monkeypatch.setattr(FakePeopleFinder, "count_people", lambda self, domain: 3)
+    monkeypatch.setattr(FakePeopleFinder, "balance_tenths", lambda self: 500)
+    _hn_has(monkeypatch, hn_thread())
+    asked = []
+    monkeypatch.setattr(FakeLLM, "parse_job_post",
+                        lambda self, text: asked.append(text) or pytest.fail("the LLM was called"))
+
+    result = runner.invoke(app, ["jobs", "--role", "Backend Engineer", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert asked == []
+    estimate = (f"Dry run: up to {companies} companies would be bought, "
+                f"at most {credits} credits; 50 left.")
+    lines = result.stdout.splitlines()
+    assert lines[-1] == estimate
+    assert (INCLUDES.format(added) in lines) == (added is not None)
+    if added is not None:
+        assert lines[-2] == INCLUDES.format(added)  # just before the estimate
+    assert sum(line.startswith("Includes") for line in lines) == (added is not None)
+
+
+def test_jobs_dry_run_with_nothing_for_the_fallback_to_read_keeps_its_estimate(monkeypatch):
+    _fakes(monkeypatch)
+    monkeypatch.setattr(FakePeopleFinder, "count_people", lambda self, domain: 3)
+    monkeypatch.setattr(FakePeopleFinder, "balance_tenths", lambda self: 500)
+    _hn_has(monkeypatch, hn_thread(item_ids=[], extra=[SOLO_POST, FERNWOOD_POST]))
+
+    result = runner.invoke(app, ["jobs", "--role", "Backend Engineer", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.splitlines()[-2:] == [
+        "Skipped: 0 on an earlier list, 0 where you've emailed someone, 0 with no one matching.",
+        "Dry run: up to 2 companies would be bought, at most 9 credits; 50 left."]
+
+
 @pytest.mark.parametrize("extra", [["--dry-run"], []])
 def test_no_hn_flag_disables_discovery(monkeypatch, extra):
     _fakes(monkeypatch)
