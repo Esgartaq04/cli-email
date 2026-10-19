@@ -1,22 +1,21 @@
-"""HN selection: prefilter, parse, LLM fallback, filter, pre-rank, cap -- before any paid call."""
+"""HN selection: prefilter, parse, LLM fallback, filter, cap -- before any paid call."""
 from dataclasses import replace
-from datetime import datetime
 
 from outreach.config import HNConfig
 from outreach.llm.fake import FakeLLM
 from outreach.pipeline.discovery import select_hn_candidates
-from outreach.pipeline.runner import RunSummary
+from outreach.pipeline.summary import RunSummary
 from outreach.sources.hn import FakeHNSource
-from outreach.types import ALL_WORK_MODES, ParsedPost
+from outreach.types import ALL_WORK_MODES, Location, ParsedPost
 from tests.pipeline.factories import build_context, hn_thread
 
 TERMS = ["backend engineer", "platform engineer"]
 
 
-def _select(ctx, known=frozenset(), allow_llm=True, run_id=0):
-    summary = RunSummary(run_id=run_id)
-    selection = select_hn_candidates(ctx, run_id, TERMS, ALL_WORK_MODES, known, summary,
-                                     allow_llm=allow_llm)
+def _select(ctx, known=frozenset(), allow_llm=True, location=Location()):
+    summary = RunSummary(run_id=0)
+    selection = select_hn_candidates(ctx, TERMS, ALL_WORK_MODES, known, summary,
+                                     allow_llm=allow_llm, location=location)
     return selection, summary
 
 
@@ -69,33 +68,50 @@ def test_non_us_posts_are_filtered():
     assert summary.hn_filtered == 1 and selection.kept == []
 
 
+def test_location_filters_hn_posts():
+    austin = (701, 'Tinyco | Backend Engineer | Austin, TX | ONSITE<p>A team of 4. '
+                   '<a href="https://tinyco.dev">tinyco.dev</a>')
+    chicago = (702, 'Bigco | Backend Engineer | Chicago, IL | ONSITE<p>A team of 400. '
+                    '<a href="https://bigco.dev">bigco.dev</a>')
+    ctx = _ctx(item_ids=[], extra=[austin, chicago])
+    selection, summary = _select(ctx, location=Location("US", "TX"))
+    assert _domains(selection.kept) == ["tinyco.dev"]
+    assert summary.hn_filtered == 1
+    # With no location asked for, both US posts stand.
+    everywhere, _ = _select(ctx)
+    assert _domains(everywhere.kept) == ["tinyco.dev", "bigco.dev"]
+
+
+def test_the_dry_mode_count_of_posts_needing_the_llm_is_on_the_summary():
+    selection, summary = _select(_ctx(item_ids=[106, 108]), allow_llm=False)
+    assert selection.needs_llm == summary.hn_needs_llm == 2
+
+
+def test_without_an_llm_a_free_text_post_needs_it_rather_than_being_rejected():
+    ctx = _ctx(item_ids=[108], llm_fallback_max=1)
+    ctx.llm = None
+    selection, summary = _select(ctx)
+    assert (selection.needs_llm, summary.hn_llm_rejected, summary.hn_llm_parsed) == (1, 0, 0)
+    assert selection.kept == []
+
+
 def test_one_company_per_domain_first_post_wins():
     selection, _ = _select(_ctx(item_ids=[101, 110]))
     assert [(c.parsed.domain, c.post.item_id) for c in selection.kept] == [("acmerobotics.com", 101)]
 
 
-def test_growth_hints_rank_first_and_cap_applies():
-    # 101 says Series B (growth), 102 and 105 say nothing (unknown), 104 says
-    # "team of 40" (seed): growth first, then unknown in thread order, seed last.
-    selection, summary = _select(_ctx(item_ids=[101, 102, 104, 105], max_new_companies=2))
-    assert _domains(selection.kept) == ["acmerobotics.com", "zetapay.com"]
-    assert _domains(selection.skipped_cap) == ["oysterhr.com", "quillhealth.io"]
-    assert (summary.hn_kept, summary.hn_skipped_cap) == (2, 2)
-    assert selection.kept[0].stage_hint.stage.value == "growth"
+def test_cap_keeps_the_first_companies_in_thread_order():
+    tiny = (601, 'Tinyco | Backend Engineer | Austin, TX | ONSITE<p>A team of 4. '
+                 '<a href="https://tinyco.dev">tinyco.dev</a>')
+    big = (602, 'Bigco | Backend Engineer | Austin, TX | ONSITE<p>We raised a $90M Series C. '
+                '<a href="https://bigco.dev">bigco.dev</a>')
+    selection, summary = _select(_ctx(item_ids=[], extra=[tiny, big], max_new_companies=1))
+    assert _domains(selection.kept) == ["tinyco.dev"]
+    assert _domains(selection.skipped_cap) == ["bigco.dev"]
+    assert (summary.hn_kept, summary.hn_skipped_cap) == (1, 1)
 
 
-def test_recently_researched_company_is_skipped():
-    ctx = _ctx(item_ids=[101, 102])
-    cid = ctx.companies.upsert("zetapay.com", "Zeta Pay", None, None)
-    earlier = ctx.runs.create("r", "s", "US", (1, 2000), datetime(2026, 9, 10))
-    ctx.runs.set_stage(earlier, cid, "evidence", "ok")
-    selection, summary = _select(ctx)
-    assert _domains(selection.skipped_recent) == ["zetapay.com"]
-    assert _domains(selection.kept) == ["acmerobotics.com"]
-    assert summary.hn_skipped_recent == 1
-
-
-def test_known_domains_are_neither_ranked_nor_capped():
+def test_known_domains_are_not_capped():
     # max_new_companies=0: known domain lands in selection.known, kept is empty
     selection, summary = _select(_ctx(item_ids=[102], max_new_companies=0),
                                  known=frozenset({"zetapay.com"}))

@@ -1,11 +1,13 @@
 import sqlite3
+from datetime import date
 from importlib import resources
 
 import pytest
 
 from outreach.store import migrations
 from outreach.store.db import connect
-from outreach.store.dimensions import CompanyRepo, ContactRepo
+from outreach.store.dimensions import CompanyRepo
+from outreach.store.emailed import EmailedRepo
 from outreach.store.migrations import migrate
 
 
@@ -15,7 +17,8 @@ def test_connect_creates_all_tables(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"companies", "contacts", "source_documents", "runs", "run_companies",
             "evidence_items", "bottlenecks", "fetch_attempts", "run_company_stages",
-            "run_postings", "findings"} <= names
+            "run_postings", "findings", "run_company_info", "run_contacts",
+            "emailed"} <= names
 
 
 def test_connect_is_idempotent(tmp_path):
@@ -44,26 +47,26 @@ def _v1_database(path):
 def test_migration_upgrades_a_v1_database_and_keeps_contacted_history(tmp_path):
     conn = _v1_database(tmp_path / "old.db")
     conn.execute("INSERT INTO companies (canonical_domain, name) VALUES ('a.example','A')")
-    conn.execute("INSERT INTO contacts (company_id, full_name, title, email_status, contacted_at) "
-                 "VALUES (1,'Ann','CTO','verified','2026-09-01T00:00:00')")
+    conn.execute("INSERT INTO contacts (company_id, full_name, title, email, email_status, contacted_at) "
+                 "VALUES (1,'Ann','CTO','ann@a.example','verified','2026-09-01T00:00:00')")
     conn.execute("INSERT INTO runs (role_title, sector, region, headcount_min, headcount_max, "
                  "started_at, status) VALUES ('r','s','US',1,2,'2026-09-01T00:00:00','done')")
     conn.commit()
     conn.close()
     new = connect(tmp_path / "old.db")
-    assert new.execute("PRAGMA user_version").fetchone()[0] == 3
-    assert ContactRepo(new).for_company(1)[0].contacted_at is not None
-    # The pre-existing company reads back with the new fields empty, and the
-    # pre-existing run is tagged as a v1 run.
+    assert new.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert EmailedRepo(new).get("ann@a.example") == date(2026, 9, 1)
+    # The pre-existing company still reads back, and the pre-existing run is
+    # tagged as a v1 run.
     company = CompanyRepo(new).get(1)
-    assert (company.funding_rounds, company.tags, company.founded_year) == ((), (), None)
+    assert company.canonical_domain == "a.example"
     assert new.execute("SELECT schema_version FROM runs").fetchone()[0] == 1
 
 
 def test_connect_is_idempotent_across_versions(tmp_path):
     connect(tmp_path / "t.db").close()
     conn = connect(tmp_path / "t.db")
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def test_migrate_applies_nothing_once_current(tmp_path, monkeypatch):
@@ -88,19 +91,53 @@ def test_failed_migration_rolls_back_columns_and_version(tmp_path, monkeypatch):
     # ...and the real migration still applies cleanly afterwards.
     monkeypatch.undo()
     migrate(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def test_migration_to_v3_from_v2_keeps_contact_history(tmp_path):
     conn = _v1_database(tmp_path / "v2.db")
     conn.executescript(migrations.MIGRATIONS[0])  # exactly what a v2 install has
     conn.execute("INSERT INTO companies (canonical_domain, name) VALUES ('a.example','A')")
-    conn.execute("INSERT INTO contacts (company_id, full_name, title, email_status, contacted_at) "
-                 "VALUES (1,'Ann','CTO','verified','2026-09-01T00:00:00')")
+    conn.execute("INSERT INTO contacts (company_id, full_name, title, email, email_status, contacted_at) "
+                 "VALUES (1,'Ann','CTO','ann@a.example','verified','2026-09-01T00:00:00')")
     conn.commit()
     conn.close()
     new = connect(tmp_path / "v2.db")
-    assert new.execute("PRAGMA user_version").fetchone()[0] == 3
-    assert ContactRepo(new).for_company(1)[0].contacted_at is not None
+    assert new.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert EmailedRepo(new).get("ann@a.example") == date(2026, 9, 1)
     tables = {r[0] for r in new.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "run_hn_posts" in tables
+
+
+def test_v4_migration_moves_contacted_marks_into_the_emailed_list(tmp_path):
+    conn = _v1_database(tmp_path / "v3.db")
+    for script in migrations.MIGRATIONS[:2]:
+        conn.executescript(script)
+    conn.execute("INSERT INTO companies (canonical_domain, name) VALUES ('a.example','A')")
+    conn.execute("INSERT INTO contacts (company_id, full_name, title, email, email_status, contacted_at) "
+                 "VALUES (1,'Ann','CTO','Ann@A.example','verified','2026-09-01T08:00:00')")
+    conn.commit()
+    conn.close()
+    new = connect(tmp_path / "v3.db")
+    assert new.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert EmailedRepo(new).get("ann@a.example") == date(2026, 9, 1)
+
+
+def test_failed_v4_migration_rolls_back_and_the_real_one_then_applies(tmp_path, monkeypatch):
+    """Half a v4 (new run columns but no emailed list) would break the next
+    connect on 'duplicate column name'."""
+    conn = _v1_database(tmp_path / "v3.db")
+    for script in migrations.MIGRATIONS[:2]:
+        conn.executescript(script)
+    conn.commit()
+    broken = migrations.MIGRATIONS[2].replace(
+        "PRAGMA user_version = 4;", "CREATE TABLE emailed (x);")  # already exists
+    monkeypatch.setattr(migrations, "MIGRATIONS", (*migrations.MIGRATIONS[:2], broken))
+    with pytest.raises(sqlite3.OperationalError):
+        migrate(conn)
+    assert not conn.in_transaction
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert "kind" not in {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+    monkeypatch.undo()
+    migrate(conn)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4

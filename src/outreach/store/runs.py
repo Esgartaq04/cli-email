@@ -3,88 +3,124 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import asdict
 from datetime import date, datetime
 
-from outreach.types import (
-    Bottleneck,
-    EvidenceItem,
-    FetchAttempt,
-    Finding,
-    HNPostRecord,
-    ParsedPost,
-    PostingRef,
-    SourceClass,
-    Stage,
-    StageResult,
-)
+from outreach.store.dimensions import row_to_contact
+from outreach.types import (CompanyInfo, Contact, FetchAttempt, HNPostRecord, Location,
+                            ParsedPost, PostingRef, RunFilters, RunInfo, SourceClass, Spend)
+
+# The schema version `start` stamps on a run. Runs from before it are told
+# apart by their lower number: they have no kind, people list or filters.
+RUN_SCHEMA_VERSION = 4
+
+
+def _filters_to_json(filters: RunFilters) -> str:
+    return json.dumps({
+        "sectors": list(filters.sectors), "sizes": list(filters.sizes),
+        "location": asdict(filters.location), "work_modes": list(filters.work_modes)})
+
+
+def _filters_from_json(text: str) -> RunFilters:
+    data = json.loads(text)
+    return RunFilters(tuple(data["sectors"]), tuple(data["sizes"]),
+                      Location(**data["location"]), tuple(data["work_modes"]))
 
 
 class RunRepo:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
-    def create(self, role_title: str, sector: str, region: str,
-               band: tuple[int, int], started_at: datetime) -> int:
+    def start(self, kind: str, role: str, filters: RunFilters, people: str,
+              started_at: datetime) -> int:
+        # headcount_min/max are columns of the old size band, which a run no
+        # longer has; they stay NOT NULL, so they are 0.
         cur = self.conn.execute(
-            """INSERT INTO runs (role_title, sector, region, headcount_min,
-                                 headcount_max, started_at, status, schema_version)
-               VALUES (?, ?, ?, ?, ?, ?, 'running', 2)""",
-            (role_title, sector, region, band[0], band[1], started_at.isoformat()),
+            """INSERT INTO runs (role_title, sector, region, headcount_min, headcount_max,
+                                 started_at, status, schema_version, kind, people, filters)
+               VALUES (?, ?, ?, 0, 0, ?, 'running', ?, ?, ?, ?)""",
+            (role, "; ".join(filters.sectors), filters.location.country,
+             started_at.isoformat(), RUN_SCHEMA_VERSION, kind, people,
+             _filters_to_json(filters)),
         )
         self.conn.commit()
         return int(cur.lastrowid)
 
+    def info(self, run_id: int) -> RunInfo | None:
+        row = self.conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None:
+            return None
+        return RunInfo(
+            int(row["id"]), row["kind"], row["role_title"], row["people"],
+            _filters_from_json(row["filters"]) if row["filters"] else None,
+            datetime.fromisoformat(row["started_at"]), int(row["schema_version"]),
+            Spend(**json.loads(row["spend"])) if row["spend"] else None)
+
+    def record_spend(self, run_id: int, spend: Spend) -> None:
+        """Add `spend` to what the run has already used. The balance is the one
+        read before the first purchase, so a later one never replaces it."""
+        row = self.conn.execute("SELECT spend FROM runs WHERE id = ?", (run_id,)).fetchone()
+        before = Spend(**json.loads(row["spend"])) if row and row["spend"] else Spend()
+        total = Spend(
+            before.balance_before if before.balance_before is not None else spend.balance_before,
+            before.emails + spend.emails, before.verifications + spend.verifications,
+            before.spent + spend.spent)
+        self.conn.execute("UPDATE runs SET spend = ? WHERE id = ?",
+                          (json.dumps(asdict(total)), run_id))
+        self.conn.commit()
+
+    def bought_before(self, company_id: int, people: str,
+                      before_run_id: int | None) -> tuple[int, datetime] | None:
+        """The latest earlier run that bought this company's contacts for the
+        same people list, as (run id, when it started).
+
+        Runs before v4 recorded no people list; their contacts were all the
+        hiring list, so for that list a pre-v4 run whose contacts stage went
+        `ok` counts too.
+        """
+        return self._earlier_contacts_run(
+            company_id, people, before_run_id, ("bought",),
+            legacy_statuses=("ok",) if people == "hiring" else ())
+
+    def came_back_empty_before(self, company_id: int, people: str,
+                               before_run_id: int | None) -> bool:
+        """Whether an earlier run searched this company for the same people list
+        and found no one to buy (which costs nothing)."""
+        return self._earlier_contacts_run(
+            company_id, people, before_run_id, ("empty", "no_matching_people")) is not None
+
+    def _earlier_contacts_run(
+            self, company_id: int, people: str, before_run_id: int | None,
+            statuses: tuple[str, ...], legacy_statuses: tuple[str, ...] = (),
+    ) -> tuple[int, datetime] | None:
+        marks = ", ".join("?" * len(statuses))
+        matches = [f"(r.people = ? AND rc.status IN ({marks}))"]
+        params: list[object] = [company_id, people, *statuses]
+        if legacy_statuses:
+            legacy_marks = ", ".join("?" * len(legacy_statuses))
+            matches.append(
+                f"(r.schema_version < {RUN_SCHEMA_VERSION} AND rc.status IN ({legacy_marks}))")
+            params.extend(legacy_statuses)
+        sql = ("SELECT r.id, r.started_at FROM runs r JOIN run_companies rc ON rc.run_id = r.id "
+               "WHERE rc.company_id = ? AND rc.stage = 'contacts' AND ("
+               + " OR ".join(matches) + ")")
+        if before_run_id is not None:
+            sql += " AND r.id < ?"
+            params.append(before_run_id)
+        row = self.conn.execute(sql + " ORDER BY r.id DESC LIMIT 1", params).fetchone()
+        return (int(row["id"]), datetime.fromisoformat(row["started_at"])) if row else None
+
     def schema_version(self, run_id: int) -> int:
-        """1 for a run recorded before findings existed (its report reads
-        `bottlenecks`), 2 for every run created since."""
+        """The schema version the run was recorded under: 4 for every run
+        `start` creates, lower for runs recorded before it."""
         row = self.conn.execute(
             "SELECT schema_version FROM runs WHERE id = ?", (run_id,)).fetchone()
         return int(row["schema_version"])
-
-    def window(self, run_id: int) -> tuple[datetime, datetime | None]:
-        """When the run started, and when it finished (None while unfinished)."""
-        row = self.conn.execute(
-            "SELECT started_at, finished_at FROM runs WHERE id = ?", (run_id,)).fetchone()
-        finished = row["finished_at"]
-        return (datetime.fromisoformat(row["started_at"]),
-                datetime.fromisoformat(finished) if finished else None)
-
-    def set_company_stage(self, run_id: int, company_id: int, result: StageResult) -> None:
-        # Not `set_stage`: that one records the pipeline step in run_companies.
-        self.conn.execute(
-            """INSERT INTO run_company_stages (run_id, company_id, stage, reasons)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(run_id, company_id) DO UPDATE SET
-                 stage = excluded.stage, reasons = excluded.reasons""",
-            (run_id, company_id, result.stage.value, json.dumps(list(result.reasons))),
-        )
-        self.conn.commit()
-
-    def company_stage(self, run_id: int, company_id: int) -> StageResult | None:
-        row = self.conn.execute(
-            "SELECT stage, reasons FROM run_company_stages WHERE run_id = ? AND company_id = ?",
-            (run_id, company_id)).fetchone()
-        if row is None:
-            return None
-        return StageResult(Stage(row["stage"]), tuple(json.loads(row["reasons"])))
 
     def finish(self, run_id: int, when: datetime) -> None:
         self.conn.execute("UPDATE runs SET finished_at = ?, status = 'done' WHERE id = ?",
                           (when.isoformat(), run_id))
         self.conn.commit()
-
-    def researched_since(self, company_id: int, since: datetime,
-                         exclude_run_id: int) -> bool:
-        """Whether another run started at or after `since` finished this
-        company's research. Used to avoid paying twice for a company HN
-        lists every month."""
-        row = self.conn.execute(
-            """SELECT 1 FROM run_companies rc JOIN runs r ON r.id = rc.run_id
-               WHERE rc.company_id = ? AND rc.stage = 'evidence' AND rc.status = 'ok'
-                 AND rc.run_id != ? AND r.started_at >= ?
-               LIMIT 1""",
-            (company_id, exclude_run_id, since.isoformat())).fetchone()
-        return row is not None
 
     def set_stage(self, run_id: int, company_id: int, stage: str,
                   status: str, error: str | None = None) -> None:
@@ -107,11 +143,8 @@ class RunRepo:
         """Every company this run ever touched, in company-id order.
 
         `run_companies` has a row for a company the moment `discover`
-        checkpoints it, whether or not it ever earns a `bottlenecks` row --
-        so this is the only complete list of companies a run researched.
-        Without it, a company whose every surface failed has no trace left
-        in the report at all: `bottlenecks` never gets a row for it (by
-        design -- see runner.py), and nothing else reads this table.
+        checkpoints it, whatever becomes of it afterwards -- so this is the
+        only complete list of the companies a run considered.
         """
         rows = self.conn.execute(
             "SELECT DISTINCT company_id FROM run_companies WHERE run_id = ? "
@@ -123,92 +156,6 @@ class RunRepo:
             "SELECT error FROM run_companies WHERE run_id=? AND company_id=? AND stage=?",
             (run_id, company_id, stage)).fetchone()
         return row["error"] if row else None
-
-    def pending_companies(self, run_id: int, stage: str) -> list[int]:
-        """Companies that reached the run but have no successful row for `stage`."""
-        rows = self.conn.execute(
-            """SELECT DISTINCT company_id FROM run_companies rc WHERE run_id = ?
-               AND NOT EXISTS (
-                 SELECT 1 FROM run_companies done
-                 WHERE done.run_id = rc.run_id AND done.company_id = rc.company_id
-                   AND done.stage = ? AND done.status = 'ok')
-               ORDER BY company_id""",
-            (run_id, stage)).fetchall()
-        return [int(r["company_id"]) for r in rows]
-
-
-class EvidenceRepo:
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self.conn = conn
-
-    def insert(self, run_id: int, item: EvidenceItem) -> int:
-        cur = self.conn.execute(
-            """INSERT INTO evidence_items (run_id, company_id, source_document_id, claim,
-                                           quote, source_class, publisher_domain,
-                                           published_at, theme)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (run_id, item.company_id, item.source_document_id, item.claim, item.quote,
-             item.source_class.value, item.publisher_domain,
-             item.published_at.isoformat() if item.published_at else None, item.theme),
-        )
-        self.conn.commit()
-        return int(cur.lastrowid)
-
-    def clear_for_company(self, run_id: int, company_id: int) -> int:
-        """Drop this run's evidence for one company; return the rows removed.
-
-        Re-running a company's evidence stage after a partial failure
-        re-extracts every surface, and `evidence_items` has no unique key to
-        absorb that. Without a delete path a resume silently doubles the
-        rows, so the report cites the same quote twice and `quotes_accepted`
-        is inflated. Scoped to (run_id, company_id): no other company's
-        evidence and no earlier run is touched.
-        """
-        cur = self.conn.execute(
-            "DELETE FROM evidence_items WHERE run_id = ? AND company_id = ?",
-            (run_id, company_id))
-        self.conn.commit()
-        return int(cur.rowcount)
-
-    def for_company(self, run_id: int, company_id: int) -> list[EvidenceItem]:
-        rows = self.conn.execute(
-            "SELECT * FROM evidence_items WHERE run_id=? AND company_id=? ORDER BY id",
-            (run_id, company_id)).fetchall()
-        return [
-            EvidenceItem(
-                r["id"], r["company_id"], r["source_document_id"], r["claim"], r["quote"],
-                SourceClass(r["source_class"]), r["publisher_domain"],
-                datetime.fromisoformat(r["published_at"]).date() if r["published_at"] else None,
-                r["theme"],
-            ) for r in rows
-        ]
-
-
-class BottleneckRepo:
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self.conn = conn
-
-    def insert(self, run_id: int, b: Bottleneck) -> int:
-        cur = self.conn.execute(
-            """INSERT INTO bottlenecks (run_id, company_id, claim, summary, passed,
-                                        reason, evidence_ids)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (run_id, b.company_id, b.claim, b.summary, int(b.passed), b.reason,
-             ",".join(str(i) for i in b.evidence_ids)),
-        )
-        self.conn.commit()
-        return int(cur.lastrowid)
-
-    def for_run(self, run_id: int) -> list[Bottleneck]:
-        rows = self.conn.execute(
-            "SELECT * FROM bottlenecks WHERE run_id = ? ORDER BY id", (run_id,)).fetchall()
-        return [
-            Bottleneck(
-                r["id"], r["company_id"], r["claim"], r["summary"], bool(r["passed"]),
-                r["reason"],
-                tuple(int(x) for x in r["evidence_ids"].split(",") if x),
-            ) for r in rows
-        ]
 
 
 class PostingRepo:
@@ -240,52 +187,58 @@ class PostingRepo:
         ]
 
 
-class FindingRepo:
+class CompanyInfoRepo:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
-    def insert(self, run_id: int, f: Finding) -> int:
-        cur = self.conn.execute(
-            """INSERT INTO findings (run_id, company_id, theme, claim, summary,
-                                     corroborated, passed, reason, evidence_ids)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (run_id, f.company_id, f.theme, f.claim, f.summary, int(f.corroborated),
-             int(f.passed), f.reason, ",".join(str(i) for i in f.evidence_ids)),
-        )
+    def insert(self, run_id: int, company_id: int, info: CompanyInfo) -> None:
+        # A resume re-runs discovery; the first answer for a company stands.
+        self.conn.execute(
+            """INSERT OR IGNORE INTO run_company_info (run_id, company_id, position,
+                   source, sector, size, fit, guessed_domain)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (run_id, company_id, info.position, info.source, info.sector, info.size,
+             info.fit, int(info.guessed_domain)))
         self.conn.commit()
-        return int(cur.lastrowid)
 
     @staticmethod
-    def _row_to_finding(r: sqlite3.Row) -> Finding:
-        return Finding(
-            r["id"], r["company_id"], r["theme"], r["claim"], r["summary"],
-            bool(r["corroborated"]), bool(r["passed"]), r["reason"],
-            tuple(int(x) for x in r["evidence_ids"].split(",") if x),
-        )
+    def _row_to_info(row: sqlite3.Row) -> CompanyInfo:
+        return CompanyInfo(int(row["position"]), row["source"], row["sector"], row["size"],
+                           row["fit"], bool(row["guessed_domain"]))
 
-    def for_company(self, run_id: int, company_id: int) -> list[Finding]:
+    def for_run(self, run_id: int) -> list[tuple[int, CompanyInfo]]:
+        """Every company the run recorded, as (company_id, info), by position."""
         rows = self.conn.execute(
-            "SELECT * FROM findings WHERE run_id = ? AND company_id = ? ORDER BY id",
-            (run_id, company_id)).fetchall()
-        return [self._row_to_finding(r) for r in rows]
+            "SELECT * FROM run_company_info WHERE run_id = ? ORDER BY position, id",
+            (run_id,)).fetchall()
+        return [(int(r["company_id"]), self._row_to_info(r)) for r in rows]
 
-    def for_run(self, run_id: int) -> list[Finding]:
-        rows = self.conn.execute(
-            "SELECT * FROM findings WHERE run_id = ? ORDER BY id", (run_id,)).fetchall()
-        return [self._row_to_finding(r) for r in rows]
+    def get(self, run_id: int, company_id: int) -> CompanyInfo | None:
+        row = self.conn.execute(
+            "SELECT * FROM run_company_info WHERE run_id = ? AND company_id = ?",
+            (run_id, company_id)).fetchone()
+        return self._row_to_info(row) if row else None
 
-    def clear_for_company(self, run_id: int, company_id: int) -> int:
-        """Drop this run's findings for one company; return the rows removed.
 
-        Same reason as `EvidenceRepo.clear_for_company`: `findings` has no
-        unique key, so re-running a company's synthesis after a partial
-        failure would otherwise stack a second copy of every finding.
-        """
-        cur = self.conn.execute(
-            "DELETE FROM findings WHERE run_id = ? AND company_id = ?",
-            (run_id, company_id))
+class RunContactRepo:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def add(self, run_id: int, company_id: int, contact_id: int, position: int) -> None:
+        # A resume buys nothing twice and lists the same person again.
+        self.conn.execute(
+            """INSERT OR IGNORE INTO run_contacts (run_id, company_id, contact_id, position)
+               VALUES (?, ?, ?, ?)""",
+            (run_id, company_id, contact_id, position))
         self.conn.commit()
-        return int(cur.rowcount)
+
+    def for_company(self, run_id: int, company_id: int) -> list[Contact]:
+        """The contacts this run listed for a company, in the order it ranked them."""
+        rows = self.conn.execute(
+            """SELECT c.* FROM run_contacts rc JOIN contacts c ON c.id = rc.contact_id
+               WHERE rc.run_id = ? AND rc.company_id = ? ORDER BY rc.position, rc.id""",
+            (run_id, company_id)).fetchall()
+        return [row_to_contact(r) for r in rows]
 
 
 class FetchAttemptRepo:
@@ -307,15 +260,14 @@ class FetchAttemptRepo:
                           keep: frozenset[SourceClass] | None = None) -> int:
         """Drop this run's fetch attempts for one company; return rows removed.
 
-        The companion to `EvidenceRepo.clear_for_company`: a re-run refetches
-        every surface, so the old attempt rows would otherwise accumulate and
-        the diagnostics would show one surface tried twice as often as it was.
+        A re-run refetches, so the old attempt rows would otherwise accumulate
+        and the diagnostics would show one page tried twice as often as it was.
 
-        Two stages write this log -- enrich (the homepage) and evidence (every
-        surface) -- and each re-derives only its own share on a resume, so
-        `only` limits the delete to some classes and `keep` spares some. It is
-        one DELETE: reading the survivors out and writing them back would lose
-        them to a crash in between, and hand them new ids.
+        More than one step can write this log and each re-derives only its own
+        share on a resume, so `only` limits the delete to some classes and
+        `keep` spares some. It is one DELETE: reading the survivors out and
+        writing them back would lose them to a crash in between, and hand them
+        new ids.
         """
         sql = "DELETE FROM fetch_attempts WHERE run_id = ? AND company_id = ?"
         params: list[object] = [run_id, company_id]

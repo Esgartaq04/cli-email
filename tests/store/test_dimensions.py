@@ -1,8 +1,8 @@
 # tests/store/test_dimensions.py
-from datetime import date, datetime
+from datetime import datetime
 from outreach.store.db import connect
-from outreach.store.dimensions import CompanyRepo, ContactRepo, DocumentRepo
-from outreach.types import CompanyFacts, FundingRound, PersonRef, SourceClass, SourceDocument
+from outreach.store.dimensions import CompanyRepo, ContactRepo
+from outreach.types import PersonRef
 
 
 def repos(tmp_path):
@@ -51,15 +51,6 @@ def test_unverified_contact_persists_without_email(tmp_path):
     assert stored.email_status == "unverified"
 
 
-def test_mark_contacted_is_visible_on_next_read(tmp_path):
-    companies, contacts = repos(tmp_path)
-    cid = companies.upsert("foo.com", "Foo", 48, "careers page")
-    person = PersonRef("A B", "CTO", None, "a@foo.com", "verified")
-    contact_id = contacts.upsert(cid, person, "hunter", datetime(2026, 9, 1))
-    contacts.mark_contacted(contact_id, datetime(2026, 9, 5))
-    assert contacts.for_company(cid)[0].contacted_at is not None
-
-
 def test_reresolving_as_unverified_clears_a_previously_verified_email(tmp_path):
     companies, contacts = repos(tmp_path)
     cid = companies.upsert("foo.com", "Foo", 48, "careers page")
@@ -88,89 +79,3 @@ def test_reresolving_as_verified_after_verified_keeps_the_address(tmp_path):
     assert stored is not None
     assert stored.email == "m@foo.com"
     assert stored.email_status == "verified"
-
-
-def test_document_insert_dedupes_and_returns_original_id(tmp_path):
-    conn = connect(tmp_path / "t.db")
-    companies, docs = CompanyRepo(conn), DocumentRepo(conn)
-    cid = companies.upsert("foo.com", "Foo", 48, "careers page")
-    doc_a = SourceDocument(None, cid, "https://foo.com/a", SourceClass.CAREERS_PAGE,
-                           "foo.com", None, datetime(2026, 9, 1), 200, "hash-a")
-    doc_b = SourceDocument(None, cid, "https://foo.com/b", SourceClass.CAREERS_PAGE,
-                           "foo.com", None, datetime(2026, 9, 1), 200, "hash-b")
-    id_a = docs.insert(doc_a)
-    id_b = docs.insert(doc_b)
-    assert id_b != id_a
-    # Re-inserting a document that already exists (same url + content_hash)
-    # must return its original id, not a stale/unrelated rowid, even though
-    # a different row was inserted more recently on this connection.
-    assert docs.insert(doc_a) == id_a
-    assert len(docs.for_company(cid)) == 2
-
-
-def test_document_reinsert_refreshes_its_dates(tmp_path):
-    """Same url and text read again: a GitHub repo whose description did not
-    change but which was pushed since. The row must carry the new push date
-    and the new fetch time, or the report shows the first-seen date forever
-    and cannot tell the document was read by this run."""
-    conn = connect(tmp_path / "t.db")
-    companies, docs = CompanyRepo(conn), DocumentRepo(conn)
-    cid = companies.upsert("foo.com", "Foo", None, None)
-    first = SourceDocument(None, cid, "https://github.com/foo/repo", SourceClass.GITHUB,
-                           "foo.com", date(2026, 3, 1), datetime(2026, 3, 2), 200, "h")
-    again = SourceDocument(None, cid, first.url, SourceClass.GITHUB, "foo.com",
-                           date(2026, 9, 15), datetime(2026, 9, 21, 10), 200, "h")
-    doc_id = docs.insert(first)
-    assert docs.insert(again) == doc_id
-    [stored] = docs.for_company(cid)
-    assert (stored.published_at, stored.fetched_at) == (date(2026, 9, 15),
-                                                         datetime(2026, 9, 21, 10))
-
-
-def test_facts_round_trip(tmp_path):
-    companies, _ = repos(tmp_path)
-    cid = companies.upsert("a.example", "A", None, None)
-    fetched = datetime(2026, 9, 30)
-    companies.set_facts(
-        cid,
-        CompanyFacts(342, "201-500", 2019,
-                     (FundingRound("series_b", date(2026, 3, 4)), FundingRound("seed", None)),
-                     ("fintech",), "hunter"),
-        fetched)
-    c = companies.get(cid)
-    assert (c.headcount, c.headcount_source, c.headcount_band, c.founded_year) == (
-        342, "hunter", "201-500", 2019)
-    assert c.funding_rounds == (FundingRound("series_b", date(2026, 3, 4)),
-                                FundingRound("seed", None))
-    assert c.tags == ("fintech",)
-    assert c.facts_fetched_at == fetched
-    assert companies.conn.execute(
-        "SELECT facts_source FROM companies WHERE id = ?", (cid,)).fetchone()[0] == "hunter"
-
-
-def test_set_facts_with_no_headcount_keeps_the_known_one(tmp_path):
-    companies, _ = repos(tmp_path)
-    cid = companies.upsert("a.example", "A", 48, "careers page")
-    companies.set_facts(cid, CompanyFacts(None, None, 2020, (), (), "hunter"),
-                        datetime(2026, 9, 30))
-    c = companies.get(cid)
-    assert (c.headcount, c.headcount_source, c.founded_year) == (48, "careers page", 2020)
-
-
-def test_mark_facts_checked_stamps_only_the_fetch_time(tmp_path):
-    companies, _ = repos(tmp_path)
-    cid = companies.upsert("a.example", "A", 48, "careers page")
-    companies.mark_facts_checked(cid, datetime(2026, 9, 30))
-    c = companies.get(cid)
-    assert c.facts_fetched_at == datetime(2026, 9, 30)
-    assert (c.headcount, c.founded_year, c.funding_rounds, c.tags) == (48, None, (), ())
-
-
-def test_github_org_set_and_cleared(tmp_path):
-    companies, _ = repos(tmp_path)
-    cid = companies.upsert("a.example", "A", None, None)
-    assert companies.get(cid).github_org is None
-    companies.set_github_org(cid, "acme")
-    assert companies.get(cid).github_org == "acme"
-    companies.set_github_org(cid, None)
-    assert companies.get(cid).github_org is None

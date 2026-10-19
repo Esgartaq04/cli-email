@@ -23,7 +23,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-outreach = ["store/*.sql", "render/templates/*.j2"]
+outreach = ["store/*.sql", "render/templates/*.j2", "data/*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

@@ -6,10 +6,15 @@ from enum import Enum
 from typing import Literal
 
 EmailStatus = Literal["verified", "unverified", "not_found"]
-StageStatus = Literal["pending", "ok", "failed", "skipped_quota",
-                      "skipped_domain_unconfirmed", "excluded_size",
-                      "excluded_no_matching_posting", "no_findings",
-                      "skipped_cap", "skipped_recent"]
+# What a run records for a company at each stage (`RunRepo.set_stage`):
+#   discover -> ok | excluded_no_matching_posting | left_out_filters | skipped_cap
+#   contacts -> bought | empty | no_matching_people | skipped_earlier_list | skipped_emailed |
+#               domain_unconfirmed | over_cap | out_of_credits | failed
+# Rows recorded by earlier versions carry other values; nothing writes them now.
+StageStatus = Literal["ok", "excluded_no_matching_posting", "left_out_filters", "skipped_cap",
+                      "bought", "empty", "no_matching_people", "skipped_earlier_list",
+                      "skipped_emailed", "domain_unconfirmed", "over_cap", "out_of_credits",
+                      "failed"]
 # "unknown" is kept by the work-mode filter: a posting that does not say is not
 # evidence against the user's preference.
 WorkMode = Literal["remote", "hybrid", "onsite", "unknown"]
@@ -19,6 +24,9 @@ EmploymentType = Literal["full_time", "other", "unknown"]
 
 
 class SourceClass(str, Enum):
+    # Only HOMEPAGE is still used: FetchAttempt records the homepage check that
+    # confirms a guessed domain. The other values only describe rows that
+    # earlier versions wrote, which must still load.
     JOB_POSTING = "job_posting"
     CAREERS_PAGE = "careers_page"
     ENG_BLOG = "eng_blog"
@@ -35,37 +43,6 @@ class SourceClass(str, Enum):
     DEV_DOCS = "dev_docs"
 
 
-class Stage(str, Enum):
-    SEED_STARTUP = "seed_startup"
-    GROWTH = "growth"
-    EXPANSION = "expansion"
-    MATURITY = "maturity"
-    UNKNOWN = "unknown"
-
-
-@dataclass(frozen=True)
-class FundingRound:
-    # "pre_seed" | "seed" | "series_a".."series_z" | "ipo" | "acquired"
-    kind: str
-    announced: date | None
-
-
-@dataclass(frozen=True)
-class CompanyFacts:
-    headcount: int | None
-    headcount_band: str | None
-    founded_year: int | None
-    funding_rounds: tuple[FundingRound, ...]
-    tags: tuple[str, ...]
-    source: str
-
-
-@dataclass(frozen=True)
-class StageResult:
-    stage: Stage
-    reasons: tuple[str, ...]
-
-
 @dataclass(frozen=True)
 class Company:
     id: int | None
@@ -73,13 +50,8 @@ class Company:
     name: str
     headcount: int | None
     headcount_source: str | None
-    # Everything below defaults so positional Company(id, domain, name, hc, src) keeps working.
+    # Defaults so positional Company(id, domain, name, hc, src) keeps working.
     headcount_band: str | None = None
-    founded_year: int | None = None
-    funding_rounds: tuple[FundingRound, ...] = ()
-    tags: tuple[str, ...] = ()
-    github_org: str | None = None
-    facts_fetched_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -93,57 +65,6 @@ class Contact:
     email_status: EmailStatus
     provider: str | None
     looked_up_at: datetime | None
-    contacted_at: datetime | None
-
-
-@dataclass(frozen=True)
-class SourceDocument:
-    id: int | None
-    company_id: int
-    url: str
-    source_class: SourceClass
-    publisher_domain: str
-    published_at: date | None
-    fetched_at: datetime
-    http_status: int
-    content_hash: str
-
-
-@dataclass(frozen=True)
-class EvidenceItem:
-    id: int | None
-    company_id: int
-    source_document_id: int
-    claim: str
-    quote: str
-    source_class: SourceClass
-    publisher_domain: str
-    published_at: date | None
-    theme: str
-
-
-@dataclass(frozen=True)
-class Bottleneck:
-    id: int | None
-    company_id: int
-    claim: str
-    summary: str
-    passed: bool
-    reason: str
-    evidence_ids: tuple[int, ...]
-
-
-@dataclass(frozen=True)
-class Finding:
-    id: int | None
-    company_id: int
-    theme: str
-    claim: str
-    summary: str
-    corroborated: bool
-    passed: bool
-    reason: str
-    evidence_ids: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -174,6 +95,85 @@ class PersonRef:
     profile_url: str | None
     email: str | None
     email_status: EmailStatus
+
+
+@dataclass(frozen=True)
+class FoundPerson:
+    """One person Hunter's Domain Search returned for a company.
+
+    `hunter_status` and `hunter_checked_on` are Domain Search's own verdict on
+    the address (e.g. "valid"), so a recent one can stand in for a paid check.
+    """
+    full_name: str
+    title: str
+    email: str
+    profile_url: str | None = None
+    hunter_status: str | None = None
+    hunter_checked_on: date | None = None
+
+
+@dataclass(frozen=True)
+class Location:
+    """The place a run looks in; the default is the whole US, as every run was before.
+
+    Maps straight onto Hunter's `headquarters_location` filter, and is what a
+    job posting's location is checked against.
+    """
+    country: str = "US"  # ISO 3166 alpha-2
+    state: str | None = None  # US state code; only with country "US"
+    city: str | None = None
+
+
+@dataclass(frozen=True)
+class RunFilters:
+    """What a run was narrowed to; stored on the run so a report can say so."""
+    sectors: tuple[str, ...] = ()
+    sizes: tuple[str, ...] = ()
+    location: Location = Location()
+    work_modes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CompanyInfo:
+    """What one run knows about one company, beyond the company itself."""
+    position: int  # the order the run considered it in
+    source: str  # "board" | "hn" | "hunter" | "hunter_hiring"
+    sector: str | None = None
+    size: str | None = None
+    fit: str = "fits"  # "fits" | "unknown" | "no", against the run's filters
+    guessed_domain: bool = False
+
+
+@dataclass(frozen=True)
+class Spend:
+    """Hunter credits a run used, in tenths of a credit."""
+    balance_before: int | None = None
+    emails: int = 0
+    verifications: int = 0
+    spent: int = 0
+
+
+@dataclass(frozen=True)
+class RunInfo:
+    """A stored run. Runs recorded before v4 have no kind, people, filters or spend."""
+    run_id: int
+    kind: str | None
+    role: str
+    people: str | None
+    filters: RunFilters | None
+    started_at: datetime
+    schema_version: int
+    spend: Spend | None
+
+
+@dataclass(frozen=True)
+class EmailedEntry:
+    """An address marked as emailed, with whatever a stored contact tells about it."""
+    address: str
+    emailed_on: date
+    full_name: str | None = None
+    title: str | None = None
+    company: str | None = None
 
 
 @dataclass(frozen=True)
@@ -214,7 +214,7 @@ class HNPostRecord:
     thread_title: str
     posted_at: date
     parse_method: str  # "parsed" | "llm"
-    status: str  # "kept" | "skipped_cap" | "skipped_recent"
+    status: str  # "kept" | "skipped_cap" (rows from earlier versions may say "skipped_recent")
     # What the post was read as, and the post itself: a resume rebuilds this
     # run's HN selection from these instead of re-reading a thread that has
     # grown since, or paying the LLM fallback again.

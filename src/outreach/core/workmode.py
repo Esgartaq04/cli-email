@@ -1,7 +1,8 @@
 """Work-mode and employment classification for job postings.
 
 Pure string matching: no I/O. Job-board adapters call the classifiers to tag a
-PostingRef; the runner calls `parse_work_modes` / `posting_matches` to filter.
+PostingRef; `parse_work_modes` / `posting_matches` filter postings by what the
+user asked for.
 
 The filters are deliberately lenient. A posting whose mode cannot be determined
 stays ("unknown"), and only a posting positively identified as contract /
@@ -28,8 +29,7 @@ def _plain(content: str) -> str:
     """Strip HTML tags (to a space, so <li>a</li><li>b</li> doesn't glue) and unescape.
 
     A regex strip is enough here: we only pattern-match the result, never render
-    it. core/ must not import from extraction/, so this is not shared with the
-    real HTML extractor.
+    it.
     """
     # Collapse whitespace so multi-word patterns survive newlines and tag gaps.
     return _WHITESPACE.sub(" ", html.unescape(_TAG.sub(" ", content)))

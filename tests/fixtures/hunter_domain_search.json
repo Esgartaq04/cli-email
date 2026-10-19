@@ -1,0 +1,111 @@
+{
+  "data": {
+    "domain": "acme.example",
+    "disposable": false,
+    "webmail": false,
+    "accept_all": true,
+    "pattern": "{first}",
+    "organization": "Acme",
+    "linked_domains": [],
+    "emails": [
+      {
+        "value": "ciaran@acme.example",
+        "type": "personal",
+        "confidence": 92,
+        "sources": [
+          {
+            "domain": "github.com",
+            "uri": "http://github.com/ciaranlee",
+            "extracted_on": "2015-07-29",
+            "last_seen_on": "2017-07-01",
+            "still_on_page": true
+          }
+        ],
+        "first_name": "Ciaran",
+        "last_name": "Lee",
+        "position": "Support Engineer",
+        "position_raw": "Support Engineer",
+        "seniority": "senior",
+        "department": "it",
+        "decision_maker": false,
+        "linkedin": null,
+        "twitter": "ciaran_lee",
+        "phone_number": null,
+        "verification": {
+          "date": "2019-12-06",
+          "status": "valid"
+        }
+      },
+      {
+        "value": "maria@acme.example",
+        "type": "personal",
+        "confidence": 97,
+        "sources": [
+          {
+            "domain": "acme.example",
+            "uri": "http://acme.example/about",
+            "extracted_on": "2024-02-11",
+            "last_seen_on": "2026-08-30",
+            "still_on_page": true
+          }
+        ],
+        "first_name": "Maria",
+        "last_name": "Santos",
+        "position": "Co-founder & CTO",
+        "position_raw": "Co-founder & CTO",
+        "seniority": "executive",
+        "department": "management",
+        "decision_maker": true,
+        "linkedin": "https://www.linkedin.com/in/maria-santos",
+        "twitter": null,
+        "phone_number": null,
+        "verification": {
+          "date": "2026-09-30",
+          "status": "valid"
+        }
+      },
+      {
+        "value": "tom@acme.example",
+        "type": "personal",
+        "confidence": 74,
+        "sources": [
+          {
+            "domain": "acme.example",
+            "uri": "http://acme.example/team",
+            "extracted_on": "2025-05-02",
+            "last_seen_on": "2026-08-30",
+            "still_on_page": true
+          }
+        ],
+        "first_name": "Tom",
+        "last_name": "Becker",
+        "position": "Engineering Manager",
+        "position_raw": "Engineering Manager",
+        "seniority": "senior",
+        "department": "it",
+        "decision_maker": false,
+        "linkedin": "tom-becker-eng",
+        "twitter": null,
+        "phone_number": null,
+        "verification": {
+          "date": null,
+          "status": null
+        }
+      }
+    ]
+  },
+  "meta": {
+    "results": 3,
+    "results_approximate": false,
+    "limit": 10,
+    "offset": 0,
+    "params": {
+      "domain": "acme.example",
+      "company": null,
+      "type": "personal",
+      "seniority": null,
+      "department": null,
+      "decision_maker": null
+    }
+  }
+}

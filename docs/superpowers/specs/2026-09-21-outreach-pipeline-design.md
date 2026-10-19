@@ -2,6 +2,7 @@
 
 **Date:** 2026-09-21
 **Status:** Implemented (V1). The targeting, evidence themes, gate thresholds, contacts flow and report layout were superseded by `2026-09-30-startup-stage-targeting-design.md` (merged in PR #2); read that spec for current behaviour.
+**Superseded:** by 2026-10-11-contact-finder-design.md, which removes the research half described here.
 **Author:** Esteven (with Claude)
 
 ---

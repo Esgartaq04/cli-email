@@ -1,21 +1,19 @@
 """Discovery from HN's "Who is hiring?" thread, up to the point money is spent.
 
 Everything here is free except the capped LLM fallback: the thread is read,
-posts are matched against the role, parsed, filtered to the region and work
-mode, ranked by the stage hints the posts give away for nothing ("Series B",
-"team of 80"), checked against recent research, and capped -- all before a
-single Hunter credit. What survives is handed to the runner.
+posts are matched against the role, parsed, filtered to the location and work
+mode, and capped -- all before a single Hunter credit. The cap takes companies
+in thread order, so it bounds what a run can cost without favouring anyone.
+What survives is handed to the job run.
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, time, timedelta
 from typing import TYPE_CHECKING, Sequence
 
-from outreach.core.hnparse import (hint_signals, parse_post, post_text,
-                                   validate_llm_post)
-from outreach.core.stage import classify_stage, parse_headcount_statement, stage_sort_key
+from outreach.core.filters import posting_in_location
+from outreach.core.hnparse import parse_post, post_text, validate_llm_post
 from outreach.core.workmode import posting_matches
 from outreach.net.fetcher import Fetcher
 from outreach.sources.jobboards.ashby import AshbyBoardSource
@@ -23,12 +21,11 @@ from outreach.sources.jobboards.greenhouse import GreenhouseBoardSource
 from outreach.sources.jobboards.lever import LeverBoardSource
 from outreach.sources.jobboards.multi import MultiBoardSource
 from outreach.sources.jobboards.region import matches_region
-from outreach.types import (HNPost, HNThread, ParsedPost, PostingRef, StageResult,
-                            WorkMode)
+from outreach.types import HNPost, HNThread, Location, ParsedPost, PostingRef, WorkMode
 
 if TYPE_CHECKING:
     from outreach.pipeline.context import RunContext
-    from outreach.pipeline.runner import RunSummary
+    from outreach.pipeline.summary import RunSummary
 
 HN_ITEM_URL = "https://news.ycombinator.com/item?id={}"
 _GENERIC_OPENINGS = re.compile(r"\b(?:roles|positions|openings)\b")
@@ -39,18 +36,15 @@ class HNCandidate:
     post: HNPost
     parsed: ParsedPost
     method: str  # "parsed" | "llm"
-    stage_hint: StageResult
-    headcount_hint: int | None
 
 
 @dataclass
 class HNSelection:
     thread: HNThread | None
     kept: list[HNCandidate] = field(default_factory=list)
-    # Companies the config tokens already found: their post is still used as
-    # evidence, but they are neither ranked nor capped -- the user chose them.
+    # Companies the config tokens already found: the cap never applies to
+    # them -- the user chose them.
     known: list[HNCandidate] = field(default_factory=list)
-    skipped_recent: list[HNCandidate] = field(default_factory=list)
     skipped_cap: list[HNCandidate] = field(default_factory=list)
     needs_llm: int = 0
 
@@ -62,9 +56,10 @@ def candidate_posting(candidate: HNCandidate) -> PostingRef:
                       p.location, p.work_mode, p.employment_type)
 
 
-def select_hn_candidates(ctx: RunContext, run_id: int, terms: Sequence[str],
+def select_hn_candidates(ctx: RunContext, terms: Sequence[str],
                          work_modes: frozenset[WorkMode], known_domains: frozenset[str],
-                         summary: RunSummary, allow_llm: bool = True) -> HNSelection:
+                         summary: RunSummary, *, allow_llm: bool = True,
+                         location: Location = Location()) -> HNSelection:
     if ctx.hn is None:
         return HNSelection(thread=None)
     thread = ctx.hn.latest_thread()
@@ -78,7 +73,6 @@ def select_hn_candidates(ctx: RunContext, run_id: int, terms: Sequence[str],
     wanted = [t.lower() for t in terms if t.strip()]
     llm_budget = config.llm_fallback_max
 
-    candidates: list[HNCandidate] = []
     seen: set[str] = set()
     for post in thread.posts:
         text = post_text(post.html)
@@ -98,7 +92,8 @@ def select_hn_candidates(ctx: RunContext, run_id: int, terms: Sequence[str],
         parsed, method = parse_post(post.html), "parsed"
         if parsed is not None:
             summary.hn_parsed += 1
-        elif not allow_llm:
+        elif not allow_llm or ctx.llm is None:
+            # Without an LLM to ask, the post is one the fallback would have to read.
             selection.needs_llm += 1
             continue
         elif llm_budget > 0:
@@ -118,7 +113,8 @@ def select_hn_candidates(ctx: RunContext, run_id: int, terms: Sequence[str],
 
         posting = PostingRef(parsed.company, parsed.domain, parsed.role, "",
                              parsed.location, parsed.work_mode, parsed.employment_type)
-        if not (matches_region(parsed.location, ctx.config.discovery.region)
+        if not (matches_region(parsed.location, location.country)
+                and posting_in_location(parsed.location, parsed.work_mode, location)
                 and posting_matches(posting, work_modes)):
             summary.hn_filtered += 1
             continue
@@ -126,31 +122,17 @@ def select_hn_candidates(ctx: RunContext, run_id: int, terms: Sequence[str],
             continue  # the same company posting twice: the first post stands
         seen.add(parsed.domain)
 
-        hints = hint_signals(text, post.posted_at.date())
-        counts = [n for n in (parse_headcount_statement(h.quote) for h in hints) if n]
-        candidate = HNCandidate(post, parsed, method,
-                                classify_stage(None, hints, ctx.today, ctx.config.stage),
-                                max(counts) if counts else None)
+        candidate = HNCandidate(post, parsed, method)
         if parsed.domain in known_domains:
             selection.known.append(candidate)
-        else:
-            candidates.append(candidate)
-
-    # Stable sort: equal stage keys keep thread order.
-    candidates.sort(key=lambda c: stage_sort_key(c.stage_hint.stage, c.headcount_hint))
-    since = datetime.combine(ctx.today, time()) - timedelta(days=config.recheck_days)
-    for candidate in candidates:
-        company = ctx.companies.find(candidate.parsed.domain)
-        if company is not None and ctx.runs.researched_since(company.id, since, run_id):
-            selection.skipped_recent.append(candidate)
         elif len(selection.kept) < config.max_new_companies:
             selection.kept.append(candidate)
         else:
             selection.skipped_cap.append(candidate)
 
     summary.hn_kept = len(selection.kept)
-    summary.hn_skipped_recent = len(selection.skipped_recent)
     summary.hn_skipped_cap = len(selection.skipped_cap)
+    summary.hn_needs_llm = selection.needs_llm
     return selection
 
 

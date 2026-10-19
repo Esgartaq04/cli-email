@@ -1,12 +1,11 @@
 from dataclasses import replace
-from datetime import date
 
 import pytest
 
-from outreach.core.hnparse import (ats_from_links, company_domain, hint_signals,
-                                   parse_post, post_links, post_text, validate_llm_post)
+from outreach.core.hnparse import (ats_from_links, company_domain, parse_post,
+                                   post_links, post_text, validate_llm_post)
 from outreach.sources.jobboards.region import matches_region
-from outreach.types import ParsedPost, SourceClass
+from outreach.types import ParsedPost
 
 
 def test_pipe_format_with_ashby_link_parses():
@@ -109,12 +108,6 @@ def test_validator_rejects_overlong_fields():
     html = "A" * 130 + ' Backend Engineer remote <a href="https://acme.io">x</a>'
     p = ParsedPost("A" * 130, "acme.io", None, "Backend Engineer", "", "remote", "unknown")
     assert validate_llm_post(p, html) is None
-
-
-def test_hint_signals_find_round_and_headcount():
-    hints = hint_signals("We raised a $30M Series B last spring. We're a team of 120 people.", date(2026, 9, 1))
-    assert sorted(h.theme for h in hints) == ["funding-round", "headcount-statement"]
-    assert all(h.source_class is SourceClass.HN_POST and h.published_at == date(2026, 9, 1) for h in hints)
 
 
 @pytest.mark.parametrize("links", [

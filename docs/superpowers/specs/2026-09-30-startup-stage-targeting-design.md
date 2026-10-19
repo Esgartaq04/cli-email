@@ -2,6 +2,7 @@
 
 **Date:** 2026-09-30 · **Branch:** `feat/v1-pipeline` · **Supersedes parts of:** `docs/superpowers/specs/2026-09-21-outreach-pipeline-design.md`
 **Status:** Implemented — merged to `main` in PR #2 (2026-10-01). See **As built** at the end for where the code departs from the text below.
+**Superseded:** by 2026-10-11-contact-finder-design.md, which removes the research half described here.
 **Follow-up (separate spec, not in scope here):** Spec B — auto-discovery from HN "Who is hiring?" threads feeding Greenhouse/Ashby/Lever tokens into this pipeline.
 
 ## Context

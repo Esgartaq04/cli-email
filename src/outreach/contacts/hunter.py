@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Sequence
 from urllib.parse import urlparse
 
 import httpx
 
-from outreach.types import EmailStatus, PersonRef
+from outreach.credits import tenths
+from outreach.types import EmailStatus, FoundPerson
 
 _BASE_URL = "https://api.hunter.io/v2"
 
@@ -14,9 +16,7 @@ _BASE_URL = "https://api.hunter.io/v2"
 # attribute breakout, but not a `javascript:` (or other non-http) scheme --
 # that needs an explicit allowlist, and for LinkedIn the allowlist is the
 # host: a Hunter payload (or a scraped source behind it) pointing a "profile"
-# at some other site must not become a clickable link. Evidence URLs don't
-# need this: they are always built from `canonical_domain`, never taken
-# verbatim from a third-party API response.
+# at some other site must not become a clickable link.
 _SAFE_URL_SCHEMES = ("http://", "https://")
 _UNSAFE_URL_CHARS = re.compile(r"[\\\s\x00-\x1f\x7f]")
 _LINKEDIN_HANDLE = re.compile(r"^[A-Za-z0-9_-]{3,100}$")
@@ -53,13 +53,14 @@ def _safe_linkedin_url(value: object) -> str | None:
 
 
 class HunterAPIError(Exception):
-    """A Hunter request answered with a non-2xx status.
+    """A Hunter request answered with a non-2xx status, or could not be made at all.
 
     Hunter authenticates with `api_key` in the query string, and httpx's own
-    `HTTPStatusError` message embeds the full request URL -- key included. The
-    pipeline writes exception text to the database and the HTML report, so the
-    original error must never escape. This one names only the endpoint path and
-    the status.
+    `HTTPStatusError` message -- like the text and repr of its transport errors
+    (offline, DNS failure, timeout) -- embeds the full request URL, key
+    included. The pipeline writes exception text to the database and the HTML
+    report, so the original error must never escape. This one names only the
+    endpoint path and the status, or the kind of failure.
     """
 
 
@@ -68,12 +69,46 @@ def hunter_get(client: httpx.Client, path: str, api_key: str, *,
     """GET one Hunter endpoint and return its JSON object.
 
     `missing_ok` turns HTTP 404 into `None` for endpoints where "no such
-    company/person" is an answer rather than a failure. Any other non-2xx
-    raises `HunterAPIError`.
+    company/person" is an answer rather than a failure. Any other non-2xx, and
+    a request that cannot be made, raises `HunterAPIError`.
     """
-    response = client.get(f"{_BASE_URL}/{path}", params={**params, "api_key": api_key})
+    failure = None
+    try:
+        response = client.get(f"{_BASE_URL}/{path}", params={**params, "api_key": api_key})
+    except httpx.TransportError as exc:
+        failure = type(exc).__name__
+    if failure is not None:
+        raise _unreachable(path, failure)
     if missing_ok and response.status_code == 404:
         return None
+    return _json_object(response, path)
+
+
+def hunter_post(client: httpx.Client, path: str, api_key: str, body: dict) -> dict:
+    """POST `body` as JSON to one Hunter endpoint and return its JSON object.
+
+    The key goes in the query string, as for `hunter_get`; the body carries
+    only the request. Any non-2xx, and a request that cannot be made, raises
+    `HunterAPIError`.
+    """
+    failure = None
+    try:
+        response = client.post(f"{_BASE_URL}/{path}", params={"api_key": api_key}, json=body)
+    except httpx.TransportError as exc:
+        failure = type(exc).__name__
+    if failure is not None:
+        raise _unreachable(path, failure)
+    return _json_object(response, path)
+
+
+def _unreachable(path: str, failure: str) -> HunterAPIError:
+    # Built and raised outside the `except` block, from the type name alone: raising inside
+    # it would keep the httpx error as `__context__` (even under `from None`), and its text
+    # and repr carry the request URL, so the key.
+    return HunterAPIError(f"Hunter {path} could not be reached ({failure})")
+
+
+def _json_object(response: httpx.Response, path: str) -> dict:
     # Checked by hand rather than via `raise_for_status()` inside a try: that
     # exception would stay attached as `__context__` even under `from None`,
     # carrying the URL (and so the key) with it.
@@ -81,6 +116,53 @@ def hunter_get(client: httpx.Client, path: str, api_key: str, *,
         raise HunterAPIError(f"Hunter {path} returned HTTP {response.status_code}")
     payload = response.json()
     return payload if isinstance(payload, dict) else {}
+
+
+def _checked_on(value: object) -> date | None:
+    """The day of a Hunter verification stamp: "2019-12-06", or a timestamp starting with one."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+
+
+def _found_person(entry: object) -> FoundPerson | None:
+    """One `data.emails[]` entry of a Domain Search; None when it has no address."""
+    if not isinstance(entry, dict):
+        return None
+    email = entry.get("value")
+    if not isinstance(email, str) or not email.strip():
+        return None
+    email = email.strip()
+    name = " ".join(part.strip() for part in (entry.get("first_name"), entry.get("last_name"))
+                    if isinstance(part, str) and part.strip())
+    position = entry.get("position")
+    verification = entry.get("verification")
+    verification = verification if isinstance(verification, dict) else {}
+    status = verification.get("status")
+    return FoundPerson(
+        full_name=name or email,
+        title=position.strip() if isinstance(position, str) else "",
+        email=email,
+        profile_url=_safe_linkedin_url(entry.get("linkedin") or entry.get("linkedin_url")),
+        hunter_status=status if isinstance(status, str) and status else None,
+        hunter_checked_on=_checked_on(verification.get("date")),
+    )
+
+
+def _credit_counter(payload: dict) -> tuple[int, int] | None:
+    """(available, used) in tenths from `data.requests.credits`, or None if unreadable."""
+    node: object = payload
+    for key in ("data", "requests", "credits"):
+        node = node.get(key) if isinstance(node, dict) else None
+    if not isinstance(node, dict):
+        return None
+    try:
+        return tenths(node.get("available")), tenths(node.get("used"))
+    except ValueError:
+        return None
 
 
 # Hunter's own verifier statuses, mapped down to the three this pipeline
@@ -93,16 +175,13 @@ _NOT_FOUND_STATUSES = frozenset({"invalid", "disposable"})
 
 
 class HunterProvider:
-    """`find`, `verify` and `remaining_credits` against Hunter's REST API.
+    """Finds people through Hunter's Domain Search and checks addresses through
+    its Email Verifier.
 
-    `find` never returns an address as `"verified"` on its own -- domain
-    search only tells you an address exists and Hunter's guess at its
-    confidence, not that it was confirmed deliverable. Every address `find`
-    returns comes back `"unverified"`, so the caller always routes it
-    through `verify` (or an already-confirmed prior result) before it is
-    ever printed as a real email. That is one of three layers enforcing the
-    verified-email rule; this is the layer closest to the data, so it is
-    the one that must never shortcut it.
+    `verify` says `"verified"` only when Hunter itself calls the address
+    deliverable; anything it could not confirm is `"unverified"`. That is one
+    of three layers enforcing the verified-email rule; this is the layer
+    closest to the data, so it is the one that must never shortcut it.
     """
 
     def __init__(self, api_key: str, client: httpx.Client | None = None) -> None:
@@ -113,39 +192,38 @@ class HunterProvider:
         data = hunter_get(self._client, path, self._api_key, **params)
         return data if data is not None else {}
 
-    def find(self, domain: str, role_keywords: Sequence[str]) -> list[PersonRef]:
-        data = self._get("domain-search", domain=domain)
-        raw = data.get("data", {})
-        emails = raw.get("emails", []) if isinstance(raw, dict) else []
-        people: list[PersonRef] = []
-        for entry in emails:
-            if not isinstance(entry, dict):
-                continue
-            value = entry.get("value")
-            if not value:
-                continue
-            first = entry.get("first_name") or ""
-            last = entry.get("last_name") or ""
-            full_name = f"{first} {last}".strip() or value
-            people.append(PersonRef(
-                full_name=full_name,
-                title=entry.get("position") or "",
-                # Domain search names this field `linkedin`; `linkedin_url` is
-                # what the other endpoints call it, kept as a fallback.
-                profile_url=_safe_linkedin_url(
-                    entry.get("linkedin") or entry.get("linkedin_url")),
-                email=value,
-                # Never "verified" here -- see class docstring.
-                email_status="unverified",
-            ))
-        return people
+    def count_people(self, domain: str) -> int:
+        """Personal addresses Hunter holds for the company. Free."""
+        data = self._get("email-count", domain=domain).get("data")
+        count = data.get("personal_emails") if isinstance(data, dict) else None
+        if isinstance(count, int) and not isinstance(count, bool):
+            return max(count, 0)
+        return 0
 
-    def find_profile(self, domain: str, first_name: str, last_name: str) -> str | None:
-        """LinkedIn URL for a named person at `domain`, via Hunter Email Finder."""
-        data = hunter_get(self._client, "email-finder", self._api_key, missing_ok=True,
-                          domain=domain, first_name=first_name, last_name=last_name)
-        raw = data.get("data") if data else None
-        return _safe_linkedin_url(raw.get("linkedin_url")) if isinstance(raw, dict) else None
+    def search_people(self, domain: str, titles: Sequence[str], limit: int) -> list[FoundPerson]:
+        """Up to `limit` personal addresses whose job title matches any of `titles`.
+
+        Hunter charges for each address it returns, so this never asks for
+        nothing (no titles would be an unfiltered search) and never keeps more
+        than `limit`.
+        """
+        if limit <= 0 or not titles:
+            return []
+        data = self._get("domain-search", domain=domain, type="personal",
+                         job_titles=",".join(titles), limit=str(limit)).get("data")
+        entries = data.get("emails") if isinstance(data, dict) else None
+        people = [person for person in map(_found_person, entries if isinstance(entries, list) else ())
+                  if person is not None]
+        return people[:limit]
+
+    def balance_tenths(self) -> int:
+        """Credits left, in tenths. A balance that cannot be read is an error, so
+        that a run buys nothing rather than spending blind."""
+        counter = _credit_counter(self._get("account"))
+        if counter is None:
+            raise HunterAPIError("Hunter account response has no credit balance")
+        available, used = counter
+        return max(0, available - used)
 
     def verify(self, email: str) -> EmailStatus:
         data = self._get("email-verifier", email=email)
@@ -159,14 +237,3 @@ class HunterProvider:
         # Hunter could not confirm deliverability either way. Defaulting to
         # "unverified" rather than "verified" is the safe direction.
         return "unverified"
-
-    def remaining_credits(self) -> int:
-        data = self._get("account")
-        raw = data.get("data", {})
-        requests = raw.get("requests", {}) if isinstance(raw, dict) else {}
-        searches = requests.get("searches", {}) if isinstance(requests, dict) else {}
-        available = searches.get("available")
-        used = searches.get("used")
-        if isinstance(available, int) and isinstance(used, int):
-            return max(0, available - used)
-        return 0
